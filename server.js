@@ -12,20 +12,19 @@ const io = new Server(server, {
   }
 });
 
-// NO HAY LÍNEAS DE app.use(express.static) O app.get('/') AQUÍ.
-// Este servidor SOLO manejará las conexiones de Socket.IO.
-
 const players = {}; // Almacena el estado de los jugadores
 
 io.on('connection', (socket) => {
     console.log('Un usuario se ha conectado:', socket.id);
 
-    // Cuando un jugador se conecta, añade su ID y posición inicial (ejemplo)
+    // Cuando un jugador se conecta, añade su ID y posición inicial
+    // Se corrige la altura inicial Y a 0.27 para que coincida con la base del modelo Cannon.js del cliente
     players[socket.id] = {
-        position: { x: 0, y: 1.8, z: 0 }, // Posición inicial del jugador (la altura 1.8 es la del jugador)
+        position: { x: 0, y: 0.27, z: 0 }, // **MODIFICADO: Posición inicial Y para que el jugador esté en el suelo**
         rotation: 0, // Rotación Y
         pitchRotation: 0, // Rotación X de la cámara (arriba/abajo)
-        flashlightOn: true // Estado inicial de la linterna
+        flashlightOn: false, // Estado inicial de la linterna
+        playerAnimationState: 'idle' // Estado inicial de la animación
     };
 
     // Envía a los jugadores actuales al nuevo jugador
@@ -41,17 +40,11 @@ io.on('connection', (socket) => {
             players[socket.id].rotation = playerData.rotation;
             players[socket.id].pitchRotation = playerData.pitchRotation;
             players[socket.id].flashlightOn = playerData.flashlightOn; // Actualiza el estado de la linterna
+            players[socket.id].playerAnimationState = playerData.playerAnimationState; // Actualiza el estado de la animación
 
             // Envía la actualización de la posición a todos los demás jugadores
-            socket.broadcast.emit('playerMoved', { id: socket.id, ...players[socket.id] });
+            socket.broadcast.emit('playerMoved', players[socket.id]);
         }
-    });
-
-    // Cuando un jugador envía un mensaje de chat
-    socket.on('chatMessage', (message) => {
-        console.log(`Mensaje de chat de ${socket.id}: ${message}`);
-        // Envía el mensaje a todos los clientes conectados, incluyendo el remitente
-        io.emit('chatMessage', { senderId: socket.id, text: message });
     });
 
     // Cuando un jugador se desconecta
@@ -65,5 +58,5 @@ io.on('connection', (socket) => {
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log(`Servidor de Socket.IO escuchando en el puerto ${PORT}`);
+    console.log(`Servidor escuchando en el puerto ${PORT}`);
 });
