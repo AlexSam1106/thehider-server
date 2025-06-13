@@ -20,10 +20,10 @@ io.on('connection', (socket) => {
     // Cuando un jugador se conecta, añade su ID y posición inicial
     // Se corrige la altura inicial Y a 0.27 para que coincida con la base del modelo Cannon.js del cliente
     players[socket.id] = {
-        position: { x: 0, y: 1.2, z: 0 }, 
+        position: { x: 0, y: 1.8, z: 0 }, 
         rotation: 0, // Rotación Y
         pitchRotation: 0, // Rotación X de la cámara (arriba/abajo)
-        flashlightOn: false, // Estado inicial de la linterna
+        flashlightOn: true, // Estado inicial de la linterna
         playerAnimationState: 'idle' // Estado inicial de la animación
     };
 
