@@ -17,36 +17,19 @@ const io = new Server(server, {
 
 const players = {}; // Almacena el estado de los jugadores
 
-// --- NUEVO: Definir una semilla global para la generación del mapa ---
-// Puedes usar un valor fijo para un mapa siempre igual, o generar uno aleatorio al inicio del servidor
-const mapSeed = Math.random(); // Genera una semilla aleatoria cada vez que el servidor inicia
-// const mapSeed = 12345; // Para un mapa fijo en cada reinicio del servidor
-
 io.on('connection', (socket) => {
     console.log('Un usuario se ha conectado:', socket.id);
 
-    // Cuando un jugador se conecta, añade su ID y posición inicial
+    // Cuando un jugador se conecta, añade su ID y posición inicial (ejemplo)
     players[socket.id] = {
-        id: socket.id, // Añadir el ID del socket al objeto del jugador para fácil referencia
         position: { x: 0, y: 1.8, z: 0 }, // Posición inicial del jugador (la altura 1.8 es la del jugador)
         rotation: 0, // Rotación Y
         pitchRotation: 0, // Rotación X de la cámara (arriba/abajo)
         flashlightOn: true // Estado inicial de la linterna
     };
 
-    // --- NUEVO: Enviar la semilla del mapa al cliente que se conecta ---
-    socket.emit('mapSeed', mapSeed);
-
     // Envía a los jugadores actuales al nuevo jugador
-    // Se envía una copia para evitar referencias directas que puedan causar problemas de estado
-    const currentPlayersCopy = {};
-    for (const id in players) {
-        if (id !== socket.id) { // No enviar el propio jugador en 'currentPlayers'
-            currentPlayersCopy[id] = players[id];
-        }
-    }
-    socket.emit('currentPlayers', currentPlayersCopy);
-
+    socket.emit('currentPlayers', players);
 
     // Envía el nuevo jugador a los otros jugadores
     socket.broadcast.emit('playerMoved', players[socket.id]); // Envía su propio estado inicial a los demás
@@ -60,8 +43,15 @@ io.on('connection', (socket) => {
             players[socket.id].flashlightOn = playerData.flashlightOn; // Actualiza el estado de la linterna
 
             // Envía la actualización de la posición a todos los demás jugadores
-            socket.broadcast.emit('playerMoved', players[socket.id]);
+            socket.broadcast.emit('playerMoved', { id: socket.id, ...players[socket.id] });
         }
+    });
+
+    // Cuando un jugador envía un mensaje de chat
+    socket.on('chatMessage', (message) => {
+        console.log(`Mensaje de chat de ${socket.id}: ${message}`);
+        // Envía el mensaje a todos los clientes conectados, incluyendo el remitente
+        io.emit('chatMessage', { senderId: socket.id, text: message });
     });
 
     // Cuando un jugador se desconecta
@@ -75,5 +65,5 @@ io.on('connection', (socket) => {
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-    console.log(`Servidor Socket.IO escuchando en el puerto ${PORT}`);
+  console.log(`Servidor de Socket.IO escuchando en el puerto ${PORT}`);
 });
