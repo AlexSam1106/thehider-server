@@ -7,7 +7,7 @@ const { Server } = require('socket.io');
 // --- CORS CONFIGURATION ---
 const io = new Server(server, {
   cors: {
-    origin: "https://thehidergame.ballongame.io", // ¡IMPORTANTE! Asegúrate que sea EXACTAMENTE tu dominio de Hostinger
+    origin: "https://thehidergame.ballongame.io", // 
     methods: ["GET", "POST"]
   }
 });
@@ -20,7 +20,7 @@ io.on('connection', (socket) => {
     // Cuando un jugador se conecta, añade su ID y posición inicial
     // Se corrige la altura inicial Y a 0.27 para que coincida con la base del modelo Cannon.js del cliente
     players[socket.id] = {
-        position: { x: 0, y: 0.27, z: 0 }, // **MODIFICADO: Posición inicial Y para que el jugador esté en el suelo**
+        position: { x: 0, y: 1.2, z: 0 }, 
         rotation: 0, // Rotación Y
         pitchRotation: 0, // Rotación X de la cámara (arriba/abajo)
         flashlightOn: false, // Estado inicial de la linterna
@@ -45,6 +45,17 @@ io.on('connection', (socket) => {
             // Envía la actualización de la posición a todos los demás jugadores
             socket.broadcast.emit('playerMoved', players[socket.id]);
         }
+    });
+
+    // Nuevo: Cuando se recibe un mensaje de chat
+    socket.on('chatMessage', (messageText) => {
+        console.log(`Mensaje de chat de ${socket.id}: ${messageText}`);
+        // Guarda el mensaje (opcional, si quieres un historial en el servidor)
+        // No es estrictamente necesario almacenar el chat en 'players' a menos que sea un historial persistente por jugador.
+        // Lo importante es retransmitirlo.
+
+        // Envía el mensaje de chat a TODOS los clientes conectados
+        io.emit('chatMessage', { senderId: socket.id, text: messageText });
     });
 
     // Cuando un jugador se desconecta
