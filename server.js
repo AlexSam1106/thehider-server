@@ -76,6 +76,10 @@
     io.on('connection', (socket) => {
         console.log(`[CONEXIÓN] Un usuario se ha conectado: ${socket.id}`);
 
+        // --- ENVIAR LISTA DE SALAS INICIAL AL CLIENTE QUE SE CONECTA ---
+        socket.emit('updateRoomList', getPublicRoomList()); 
+        console.log(`[LOBBY] Lista de salas inicial enviada a nuevo cliente ${socket.id}.`);
+
         // --- Manejo del registro de usuario desde la página del menú ---
         socket.on('registerUser', (userData) => {
             const { username, bio } = userData;
@@ -103,6 +107,9 @@
                 socket.emit('usernameRegistered', { username: username, bio: bio });
 
                 // Envía la lista de salas actualizada a todos los clientes (especialmente al menú)
+                // Esto es redundante para el cliente que acaba de registrarse si ya recibió la inicial,
+                // pero asegura que todos los demás clientes también se actualicen si el registro
+                // cambia métricas como "jugadores conectados" que puedan estar en getPublicRoomList.
                 io.emit('updateRoomList', getPublicRoomList());
                 console.log(`[LOBBY] Lista de salas actualizada emitida a todos los clientes después de registro.`);
             }
