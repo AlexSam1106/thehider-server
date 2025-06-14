@@ -373,9 +373,9 @@
                                 if (remainingPlayersIds.length > 0) {
                                     const newHostId = remainingPlayersIds[0];
                                     oldRoom.hostId = newHostId;
-                                    oldRoom.hostUsername = players[remainingPlayersIds[0]] ? players[remainingPlayersIds[0]].username : 'Desconocido';
+                                    oldRoom.hostUsername = players[newHostId] ? players[newHostId].username : 'Desconocido';
                                     io.to(oldRoom.id).emit('hostChanged', { newHostId: oldRoom.hostId, newHostUsername: oldRoom.hostUsername });
-                                    console.log(`[SALA] Host de ${oldRoom.name} cambió a ${oldRoom.hostUsername}.`);
+                                    console.log(`[SALA] Host de ${oldRoom.name} cambió a ${oldRoom.hostUsername}.`); // CORREGIDO AQUÍ
                                 } else {
                                     const hostMenuSocket = io.sockets.sockets.get(oldRoom.hostId);
                                     if (!hostMenuSocket || !players[oldRoom.hostId] || !players[oldRoom.hostId].isConnectedToMenu) {
