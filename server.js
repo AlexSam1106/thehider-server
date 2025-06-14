@@ -1,4 +1,4 @@
-const express = require('express');
+    const express = require('express');
     const app = express();
     const http = require('http');
     const server = http.createServer(app);
@@ -485,7 +485,7 @@ const express = require('express');
                             console.log(`[SALA] Cliente de juego ${disconnectedUsername} eliminado del mapa de sala ${room.name} (${disconnectedRoomId}).`);
                         }
                         socket.to(disconnectedRoomId).emit('playerDisconnected', socket.id);
-                        room.lastActivity = Date.Date();
+                        room.lastActivity = Date.now(); // Corregido: Date.now()
 
                         // Reasignar host si el desconectado era el host (y era un cliente 3D)
                         if (room.hostId === socket.id) {
