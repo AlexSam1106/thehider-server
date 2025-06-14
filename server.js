@@ -15,13 +15,14 @@
         // Este servidor SOLO manejará las conexiones de Socket.IO.
         // No hay rutas de Express para servir archivos estáticos aquí.
 
-        // players almacenará el estado completo de CADA jugador conectado, indexado por su socket.id
-        // Ejemplo: { 'socketId1': { username: 'Player1', bio: '...', position: {...}, roomId: 'room123', ... } }
+        // players almacenará el estado completo de CADA socket conectado (tanto menú como juego), indexado por su socket.id
+        // Ejemplo: { 'socketId1': { username: 'Player1', bio: '...', position: {...}, roomId: 'room123', isGameClient: true, ... } }
         const players = {}; 
 
         // rooms almacenará el estado de las salas, incluyendo los jugadores actualmente en ellas
         // rooms[roomId].players ahora será un OBJETO (mapa) indexado por socket.id, conteniendo REFERENCIAS a los objetos de 'players'
-        // Ejemplo: { 'room123': { id: 'room123', name: 'Sala de Prueba', hostId: 'socketId1', hostUsername: 'Player1', players: { 'socketId1': playerObjectRef, 'socketId2': playerObjectRef }, maxPlayers: 6, status: 'waiting' } }
+        // SOLO los sockets del JUEGO 3D se añadirán a este mapa.
+        // Ejemplo: { 'room123': { id: 'room123', name: 'Sala de Prueba', hostId: 'socketIdMenu1', hostUsername: 'Player1', players: { 'socketIdGame1': playerObjectRef, 'socketIdGame2': playerObjectRef }, maxPlayers: 6, status: 'waiting' } }
         const rooms = {};
 
         // Función para generar un ID único para las salas
@@ -38,9 +39,9 @@
                 publicRooms.push({
                     id: room.id,
                     name: room.name,
-                    hostId: room.hostId,         // Incluir el ID del host
+                    hostId: room.hostId,         // Incluir el ID del host (el socket del menú que la creó)
                     hostUsername: room.hostUsername, // Incluir el nombre de usuario del host
-                    currentPlayers: Object.keys(room.players).length, // Número de jugadores en la sala
+                    currentPlayers: Object.keys(room.players).length, // Contar SOLO los jugadores del juego 3D
                     maxPlayers: room.maxPlayers,
                     status: room.status // 'waiting', 'playing', 'full'
                 });
@@ -57,17 +58,16 @@
                 // Notificar a todos los jugadores en la sala que se cerró
                 io.to(roomId).emit('roomClosed', { roomId: roomId, message: message });
 
-                // Sacar a todos los jugadores de la sala de Socket.IO y actualizar su estado en 'players'
+                // Sacar a todos los jugadores de la sala de Socket.IO y limpiar su estado
                 for (const playerSocketId in room.players) {
-                    if (players[playerSocketId]) {
-                        players[playerSocketId].roomId = null; // Quitar al jugador de la sala
-                    }
                     const playerSocket = io.sockets.sockets.get(playerSocketId);
                     if (playerSocket) {
                         playerSocket.leave(roomId); // Sacar de la room de Socket.IO
                         // Limpiar roomId y username en el socket si todavía existe la conexión
                         delete playerSocket.roomId;
                         delete playerSocket.username;
+                        // Marcar como no cliente de juego si estaba en players
+                        if (players[playerSocketId]) players[playerSocketId].isGameClient = false;
                     }
                 }
                 delete rooms[roomId]; // Eliminar la sala del objeto 'rooms'
@@ -79,6 +79,21 @@
         io.on('connection', (socket) => {
             console.log(`[CONEXIÓN] Un usuario se ha conectado: ${socket.id}`);
 
+            // Inicializa una entrada vacía para el nuevo socket
+            players[socket.id] = {
+                username: socket.id.substring(0, 6), // Default username (temp)
+                bio: "",
+                position: { x: 0, y: 0.27, z: 0 }, 
+                rotation: 0, 
+                pitchRotation: 0, 
+                flashlightOn: true, 
+                playerAnimationState: 'idle',
+                roomId: null, // No está en ninguna sala al principio
+                isGameClient: false // Indica si es un cliente de juego 3D o solo del menú
+            };
+            socket.username = players[socket.id].username; // Para fácil acceso
+            socket.roomId = null; // Para fácil acceso
+
             // --- ENVIAR LISTA DE SALAS INICIAL AL CLIENTE QUE SE CONECTA ---
             socket.emit('updateRoomList', getPublicRoomList()); 
             console.log(`[LOBBY] Lista de salas inicial enviada a nuevo cliente ${socket.id}.`);
@@ -88,29 +103,17 @@
                 const { username, bio } = userData;
                 console.log(`[REGISTRO] Usuario '${username}' (${socket.id}) intentando registrarse.`);
 
-                // Verifica si el nombre de usuario ya está en uso por algún jugador CONECTADO y REGISTRADO
-                const usernameExists = Object.values(players).some(p => p.username === username && p.roomId !== null); // Solo considera los que están activos en una sala
-                // OJO: Si el jugador se desconecta y se reconecta rápidamente, su "username" podría aún estar en el objeto players global,
-                // pero su socket.id habría cambiado. Esto es una validación simple, no anti-trampas.
+                // Valida si el nombre de usuario ya está en uso por otro *socket activo*
+                const usernameExists = Object.values(players).some(p => p.username === username && p.id !== socket.id); // Check against other active sockets
 
                 if (usernameExists) {
                     console.log(`[REGISTRO FALLIDO] Nombre de usuario '${username}' ya existe.`);
                     socket.emit('usernameExists', { username: username });
                 } else {
-                    // Si el nombre de usuario es único o el antiguo socket se desconectó, lo registra/actualiza
-                    players[socket.id] = {
-                        username: username, // Almacena el nombre de usuario
-                        bio: bio, // Almacena la bio
-                        position: { x: 0, y: 0.27, z: 0 }, // Posición inicial por defecto
-                        rotation: 0, 
-                        pitchRotation: 0, 
-                        flashlightOn: true, 
-                        playerAnimationState: 'idle',
-                        roomId: null // El jugador aún no está en ninguna sala (está en el lobby del menú)
-                    };
-                    // Adjunta username y roomId directamente al objeto socket para fácil acceso en otros eventos
-                    socket.username = username;
-                    socket.roomId = null; 
+                    // Actualiza los datos del jugador para este socket
+                    players[socket.id].username = username;
+                    players[socket.id].bio = bio;
+                    socket.username = username; // Actualiza también el username en el socket
 
                     console.log(`[REGISTRO EXITOSO] Usuario '${username}' registrado con éxito para ID: ${socket.id}.`);
                     socket.emit('usernameRegistered', { username: username, bio: bio });
@@ -121,19 +124,19 @@
                 }
             });
 
-            // --- Manejo de la creación de salas ---
+            // --- Manejo de la creación de salas (desde el menú) ---
             socket.on('createRoom', (roomData) => {
                 const { roomName, maxPlayers } = roomData;
                 const creatorId = socket.id;
                 const creatorUsername = players[creatorId] ? players[creatorId].username : 'Desconocido';
 
-                if (!players[creatorId]) {
-                    console.log(`[CREAR SALA FALLIDO] Creador no registrado: ${creatorId}`);
+                if (!players[creatorId] || !players[creatorId].username) {
+                    console.log(`[CREAR SALA FALLIDO] Creador no registrado o sin nombre: ${creatorId}`);
                     socket.emit('roomError', { message: 'Debes registrar un perfil de usuario primero.' });
                     return;
                 }
 
-                // Comprobar si el jugador ya está en una sala
+                // Comprobar si el jugador ya está en una sala (menú o juego)
                 if (players[creatorId].roomId) {
                     console.log(`[CREAR SALA FALLIDO] Jugador ${creatorUsername} ya está en la sala ${players[creatorId].roomId}.`);
                     socket.emit('roomError', { message: 'Ya estás en una sala. Abandónala para crear una nueva.' });
@@ -144,26 +147,22 @@
                 rooms[roomId] = {
                     id: roomId,
                     name: roomName,
-                    hostId: creatorId,
-                    hostUsername: creatorUsername, // Guardar el nombre de usuario del anfitrión
-                    players: {}, // Ahora es un OBJETO (mapa)
+                    hostId: creatorId, // Host es el socket del menú que creó la sala
+                    hostUsername: creatorUsername, 
+                    players: {}, // **INICIALMENTE VACÍO:** Solo los clientes 3D se añadirán aquí
                     maxPlayers: maxPlayers,
                     status: 'waiting' // Estado inicial de la sala
                 };
 
-                // El creador se une a la sala de Socket.IO (a nivel de framework)
-                socket.join(roomId);
-                // Actualiza el roomId del jugador en el objeto global 'players' y en el socket
+                // El socket del menú NO se une a la sala a nivel de framework ni se añade a room.players aquí
+                // Solo se actualiza su roomId en el objeto global 'players'
                 players[creatorId].roomId = roomId; 
-                socket.roomId = roomId;
-
-                // Añade el jugador al mapa de jugadores de la sala (por referencia al objeto global players)
-                rooms[roomId].players[creatorId] = players[creatorId];
+                socket.roomId = roomId; // Referencia en el socket
 
                 console.log(`[SALA CREADA] Sala '${roomName}' (ID: ${roomId}) creada por ${creatorUsername}.`);
                 socket.emit('roomCreated', { roomId: roomId, roomName: roomName });
 
-                // Envía la lista de salas actualizada a todos los clientes (especialmente al menú)
+                // Envía la lista de salas actualizada a todos los clientes (para que el menú la vea)
                 io.emit('updateRoomList', getPublicRoomList());
                 console.log(`[LOBBY] Lista de salas actualizada después de creación de '${roomName}'.`);
             });
@@ -176,8 +175,8 @@
 
                 console.log(`[UNIRSE SALA MENU] Jugador '${joiningPlayerUsername}' (${joiningPlayerId}) intentando unirse a sala ${roomId}.`);
 
-                if (!players[joiningPlayerId]) {
-                    console.log(`[UNIRSE SALA MENU FALLIDO] Jugador no registrado: ${joiningPlayerId}`);
+                if (!players[joiningPlayerId] || !players[joiningPlayerId].username) {
+                    console.log(`[UNIRSE SALA MENU FALLIDO] Jugador no registrado o sin nombre: ${joiningPlayerId}`);
                     socket.emit('roomError', { message: 'Debes registrar un perfil de usuario primero.' });
                     return;
                 }
@@ -187,26 +186,31 @@
                     const oldRoomId = players[joiningPlayerId].roomId;
                     const oldRoom = rooms[oldRoomId];
                     if (oldRoom) {
-                        delete oldRoom.players[joiningPlayerId]; // Eliminar del mapa de jugadores de la sala
-                        socket.leave(oldRoomId);
-                        console.log(`[SALA] Jugador ${joiningPlayerUsername} dejó la sala ${oldRoom.name} (${oldRoomId}).`);
-                        // Notificar a los demás jugadores en la sala antigua que alguien se fue
-                        socket.to(oldRoomId).emit('playerLeftRoom', { socketId: joiningPlayerId, username: joiningPlayerUsername });
-                        // Si la sala antigua se queda sin jugadores, la eliminamos
-                        if (Object.keys(oldRoom.players).length === 0) {
+                        // Si el jugador saliente era un cliente de juego 3D, quítalo de la sala.players
+                        if (players[joiningPlayerId].isGameClient && oldRoom.players[joiningPlayerId]) {
+                            delete oldRoom.players[joiningPlayerId]; 
+                            socket.leave(oldRoomId); // Saca el socket del framework
+                            socket.to(oldRoomId).emit('playerLeftRoom', { socketId: joiningPlayerId, username: joiningPlayerUsername });
+                            console.log(`[SALA] Cliente de juego ${joiningPlayerUsername} dejó la sala ${oldRoom.name} (${oldRoomId}).`);
+                        } else {
+                            // Si solo era un cliente de menú, solo actualiza su roomId
+                            console.log(`[SALA] Cliente de menú ${joiningPlayerUsername} dejó la sala ${oldRoom.name} (${oldRoomId}).`);
+                        }
+                       
+                        // Lógica para el host y limpieza de sala si queda vacía
+                        if (Object.keys(oldRoom.players).length === 0) { // Si no quedan clientes 3D en la sala
                             delete rooms[oldRoomId];
                             console.log(`[SALA] Sala ${oldRoom.name} (${oldRoomId}) vacía y eliminada.`);
-                        } else if (oldRoom.hostId === joiningPlayerId) { // Si el que se va era el host
-                             // Asignar un nuevo host
-                             const remainingPlayersIds = Object.keys(oldRoom.players);
+                        } else if (oldRoom.hostId === joiningPlayerId) { // Si el que se va era el host (socket del menú)
+                             // Asignar un nuevo host de menú (el primer jugador en el MAPA de players de la sala)
+                             const remainingPlayersIds = Object.keys(oldRoom.players); // Estos son socket IDs de clientes 3D
                              if (remainingPlayersIds.length > 0) {
-                                 const newHostId = remainingPlayersIds[0];
+                                 const newHostId = remainingPlayersIds[0]; // ID del primer cliente 3D
                                  oldRoom.hostId = newHostId;
                                  oldRoom.hostUsername = players[newHostId] ? players[newHostId].username : 'Desconocido';
                                  io.to(oldRoomId).emit('hostChanged', { newHostId: oldRoom.hostId, newHostUsername: oldRoom.hostUsername });
                                  console.log(`[SALA] Host de ${oldRoom.name} cambió a ${oldRoom.hostUsername}.`);
                              } else {
-                                 // Si no quedan jugadores, la sala se elimina de todos modos.
                                  cleanupRoom(oldRoomId, 'El anfitrión se desconectó y no quedaron jugadores.');
                              }
                         }
@@ -227,38 +231,24 @@
                     return;
                 }
                 
-                // Añade el jugador a la lista de jugadores de la sala (referencia)
-                // Se asume que players[joiningPlayerId] ya existe por el 'registerUser' previo
-                room.players[joiningPlayerId] = players[joiningPlayerId];
-
-                // El jugador se une a la sala de Socket.IO (a nivel de framework)
-                socket.join(roomId);
                 // Actualiza el roomId del jugador en el objeto global 'players' y en el socket
                 players[joiningPlayerId].roomId = roomId; 
                 socket.roomId = roomId;
 
-                console.log(`[SALA UNIDA MENU] Jugador '${joiningPlayerUsername}' se unió a la sala '${room.name}' (ID: ${roomId}).`);
+                // El cliente del menú NO se une a la sala de Socket.IO aquí, ni se añade a room.players.
+                // Esto ocurrirá cuando el cliente 3D se conecte con 'gameJoinRoom'.
+
+                console.log(`[SALA UNIDA MENU] Jugador '${joiningPlayerUsername}' está ahora en la sala '${room.name}' (ID: ${roomId}) a nivel de menú.`);
                 
                 // Envía la confirmación al jugador que se unió, incluyendo la lista de jugadores de la sala
-                const playersInRoomArray = Object.values(room.players); // Convertir el mapa a array para enviar
+                const playersInRoomArray = Object.values(room.players); // Clientes 3D actuales en la sala
                 socket.emit('roomJoined', { 
                     roomId: roomId, 
                     roomName: room.name, 
-                    playersInRoom: playersInRoomArray.map(p => ({ id: Object.keys(room.players).find(key => room.players[key] === p), username: p.username })) 
-                }); // Note: Getting ID from map key directly
+                    playersInRoom: playersInRoomArray.map(p => ({ id: p.id, username: p.username })) 
+                }); 
 
-                // Notifica a los demás jugadores en la sala que alguien se unió
-                socket.to(roomId).emit('playerJoinedRoom', { 
-                    id: joiningPlayerId, 
-                    username: joiningPlayerUsername, 
-                    position: players[joiningPlayerId].position,
-                    rotation: players[joiningPlayerId].rotation,
-                    pitchRotation: players[joiningPlayerId].pitchRotation,
-                    flashlightOn: players[joiningPlayerId].flashlightOn,
-                    playerAnimationState: players[joiningPlayerId].playerAnimationState
-                });
-
-                // Envía la lista de salas actualizada a todos los clientes (especialmente al menú)
+                // Notifica a los demás clientes del menú sobre la lista actualizada
                 io.emit('updateRoomList', getPublicRoomList());
                 console.log(`[LOBBY] Lista de salas actualizada después de que ${joiningPlayerUsername} se uniera a '${room.name}'.`);
             });
@@ -278,6 +268,7 @@
                     return;
                 }
 
+                // El host de la sala es el socket del MENÚ que la creó, no un cliente 3D.
                 if (room.hostId !== deleterId) {
                     console.log(`[ELIMINAR SALA FALLIDO] Jugador ${deleterId} no es el anfitrión de la sala ${roomId}.`);
                     socket.emit('roomError', { message: 'Solo el anfitrión puede eliminar esta sala.' });
@@ -297,95 +288,106 @@
                 const { username, roomId } = data;
                 console.log(`[SERVER] Cliente 3D - Jugador ${username} (ID: ${socket.id}) intentando confirmar unión a sala: ${roomId}`);
 
-                // Asegura que el jugador esté en el objeto global 'players'.
+                // 1. Actualiza el objeto `players` global para este socket.
                 // Esto es crucial si el jugador recargó la página del juego directamente
                 // sin pasar por el menú, o si hubo un reinicio del servidor.
                 if (!players[socket.id]) {
-                    players[socket.id] = {
+                     players[socket.id] = {
                         username: username,
-                        bio: "", // Asume bio vacía si no viene del menú
+                        bio: "", 
                         position: { x: 0, y: 0.27, z: 0 }, 
                         rotation: 0, 
                         pitchRotation: 0, 
                         flashlightOn: true, 
                         playerAnimationState: 'idle',
-                        roomId: null // Se actualizará en breve
+                        roomId: null, // Se actualizará en breve
+                        isGameClient: true // ¡Ahora es un cliente de juego!
                     };
                     console.log(`[SERVER] Jugador ${username} (ID: ${socket.id}) creado/registrado al entrar al juego 3D.`);
                 } else {
-                    // Si ya está registrado, actualiza el username si es necesario (p.ej. si cambió de navegador)
+                    // Si ya está registrado (p.ej., del menú), actualiza sus datos y lo marca como cliente de juego
                     players[socket.id].username = username;
+                    players[socket.id].isGameClient = true;
+                    // También reinicia la posición si es la primera vez que se une a esta sala en esta sesión
+                    if (players[socket.id].roomId !== roomId) {
+                        players[socket.id].position = { x: 0, y: 0.27, z: 0 };
+                        players[socket.id].rotation = 0;
+                        players[socket.id].pitchRotation = 0;
+                    }
+                    console.log(`[SERVER] Jugador ${username} (ID: ${socket.id}) actualizado a cliente de juego 3D.`);
                 }
 
                 const player = players[socket.id]; // Obtiene la referencia al objeto del jugador
                 
-                // Asegúrate de que la sala exista
+                // 2. Asegúrate de que la sala exista.
                 if (!roomId || !rooms[roomId]) {
                     console.warn(`[SERVER] Cliente 3D - Sala ${roomId} no encontrada o inválida para ${username}. Redirigiendo a menú.`);
                     socket.emit('roomClosed', { roomId: roomId, message: `La sala '${roomId}' no existe o ha sido cerrada.` });
-                    return; // No proceder con la unión
+                    return; 
                 }
 
                 const room = rooms[roomId]; // Referencia a la sala
 
-                // Si el jugador ya estaba en otra sala, lo saca de ella primero
+                // 3. Si el jugador ya estaba en otra sala, lo saca de ella primero.
                 if (player.roomId && player.roomId !== roomId) {
                     const oldRoom = rooms[player.roomId];
                     if (oldRoom) {
-                        delete oldRoom.players[socket.id]; // Eliminar del mapa de jugadores de la sala
-                        socket.leave(player.roomId);
-                        console.log(`[SERVER] Jugador ${player.username} dejó la sala ${oldRoom.name} (${player.roomId}).`);
-                        io.to(player.roomId).emit('playerLeftRoom', { socketId: socket.id, username: player.username });
-                        if (Object.keys(oldRoom.players).length === 0) {
-                            delete rooms[oldRoom.id];
-                            console.log(`[SERVER] Sala ${oldRoom.name} (${oldRoom.id}) vacía y eliminada.`);
-                        } else if (oldRoom.hostId === socket.id) { // Si el que se va era el host
-                            const remainingPlayersIds = Object.keys(oldRoom.players);
-                            if (remainingPlayersIds.length > 0) {
-                                oldRoom.hostId = remainingPlayersIds[0];
-                                oldRoom.hostUsername = players[remainingPlayersIds[0]] ? players[remainingPlayersIds[0]].username : 'Desconocido';
-                                io.to(oldRoom.id).emit('hostChanged', { newHostId: oldRoom.hostId, newHostUsername: oldRoom.hostUsername });
-                                console.log(`[SALA] Host de ${oldRoom.name} cambió a ${oldRoom.hostUsername}.`);
-                            } else {
-                                cleanupRoom(oldRoom.id, 'El anfitrión se desconectó y no quedaron jugadores.');
+                        if (oldRoom.players[socket.id]) { // Asegura que solo elimine si era un cliente de juego en la anterior
+                            delete oldRoom.players[socket.id]; 
+                            socket.leave(player.roomId);
+                            console.log(`[SERVER] Jugador ${player.username} dejó la sala ${oldRoom.name} (${player.roomId}).`);
+                            io.to(player.roomId).emit('playerLeftRoom', { socketId: socket.id, username: player.username });
+                            if (Object.keys(oldRoom.players).length === 0) { // Si la sala antigua queda vacía de clientes 3D
+                                delete rooms[oldRoom.id];
+                                console.log(`[SERVER] Sala ${oldRoom.name} (${oldRoom.id}) vacía y eliminada.`);
+                            } else if (oldRoom.hostId === socket.id) { // Si el que se va era el host (del cliente 3D)
+                                const remainingPlayersIds = Object.keys(oldRoom.players);
+                                if (remainingPlayersIds.length > 0) {
+                                    oldRoom.hostId = remainingPlayersIds[0];
+                                    oldRoom.hostUsername = players[remainingPlayersIds[0]] ? players[remainingPlayersIds[0]].username : 'Desconocido';
+                                    io.to(oldRoom.id).emit('hostChanged', { newHostId: oldRoom.hostId, newHostUsername: oldRoom.hostUsername });
+                                    console.log(`[SALA] Host de ${oldRoom.name} cambió a ${oldRoom.hostUsername}.`);
+                                } else {
+                                    cleanupRoom(oldRoom.id, 'El anfitrión se desconectó y no quedaron jugadores.');
+                                }
                             }
                         }
                     }
                 }
 
-                // Asegura que el socket se una a la sala de Socket.IO (a nivel de framework)
+                // 4. Une el socket a la sala de Socket.IO (framework) y actualiza el estado del jugador.
                 socket.join(roomId);
-                // Establece el roomId del jugador en el objeto global 'players' y en el socket
                 player.roomId = roomId; 
-                socket.roomId = roomId; // Usado para validaciones rápidas en otros eventos
-                socket.username = username; // Usado para chat
+                socket.roomId = roomId; // Para fácil acceso en otros eventos
+                socket.username = username; // Para fácil acceso en el chat
 
-                // Añade el jugador al mapa de jugadores de la sala (por referencia) si no está ya
+                // 5. Añade el jugador al mapa de `players` de la sala (por referencia)
                 if (!room.players[socket.id]) {
-                    room.players[socket.id] = player;
+                    room.players[socket.id] = player; // Añade la referencia al objeto completo del jugador
                     console.log(`[SERVER] Jugador ${username} añadido a room.players de sala ${roomId}.`);
                 } else {
-                    console.log(`[SERVER] Jugador ${username} ya estaba en room.players de sala ${roomId}.`);
+                    console.log(`[SERVER] Jugador ${username} ya estaba en room.players de sala ${roomId}. Actualizando.`);
+                    // Si ya estaba, simplemente se actualiza la referencia (ya que 'player' es una referencia al global)
                 }
                 
                 room.lastActivity = Date.now(); // Actualiza actividad de la sala
 
-                console.log(`[SERVER] Cliente 3D - Jugador ${username} (ID: ${socket.id}) CONFIRMADO en sala ${roomId}.`);
+                console.log(`[SERVER] Cliente 3D - Jugador ${username} (ID: ${socket.id}) CONFIRMADO en sala ${roomId}. Jugadores en sala: ${Object.keys(room.players).length}`);
                 
-                // Enviar todos los jugadores de esta sala al cliente que se acaba de unir
+                // 6. Enviar todos los jugadores de esta sala al cliente que se acaba de unir
                 const playersInCurrentRoom = {};
                 for (const pId in room.players) {
-                    // Asegurarse de que el objeto completo del jugador se envía, no solo la referencia si `room.players` guarda referencias
+                    // Envía una COPIA del objeto, no la referencia directa para evitar modificaciones inesperadas del cliente.
                     playersInCurrentRoom[pId] = { ...room.players[pId] }; 
                 }
                 socket.emit('currentPlayers', playersInCurrentRoom);
-                console.log(`[SERVER] currentPlayers enviados a ${username} en sala ${roomId}:`, Object.keys(playersInCurrentRoom).length, 'jugadores.');
+                console.log(`[SERVER] currentPlayers enviados a ${username} en sala ${roomId}: ${Object.keys(playersInCurrentRoom).length} jugadores.`);
 
-                // Notificar a los otros jugadores en la sala sobre el nuevo jugador
+                // 7. Notificar a los otros jugadores en la sala sobre el nuevo jugador
                 socket.to(roomId).emit('playerConnected', { id: socket.id, ...player }); // Envía el objeto completo del jugador
                 console.log(`[SERVER] playerConnected emitido a sala ${roomId} por ${username}.`);
                 
-                // Actualizar la lista de salas para todos los clientes (menú y otros juegos)
+                // 8. Actualizar la lista de salas para todos los clientes (menú y otros juegos)
                 io.emit('updateRoomList', getPublicRoomList());
                 console.log(`[LOBBY] Lista de salas actualizada globalmente.`);
             });
@@ -393,7 +395,7 @@
             // Cuando un jugador se mueve, las actualizaciones se emiten SOLO a los de la misma sala
             socket.on('playerMoved', (playerData) => {
                 const playerId = socket.id;
-                // Verificar que el jugador esté asociado a una sala a través de socket.roomId
+                // Verificar que el jugador esté asociado a una sala a través de socket.roomId Y que esté en el mapa de players de la sala
                 if (socket.roomId && rooms[socket.roomId] && rooms[socket.roomId].players[playerId]) { 
                     const currentRoom = rooms[socket.roomId];
                     const currentPlayer = players[playerId]; // Referencia al objeto global del jugador
@@ -417,7 +419,7 @@
 
             // Cuando un jugador envía un mensaje de chat, ahora se envía solo a la sala actual
             socket.on('chatMessage', (message) => {
-                // Utiliza socket.username (establecido en gameJoinRoom) y socket.roomId
+                // Utiliza socket.username (establecido en gameJoinRoom o registerUser) y socket.roomId
                 if (socket.roomId && rooms[socket.roomId] && socket.username) {
                     const senderUsername = socket.username;
                     console.log(`[CHAT EN SALA] Mensaje de ${senderUsername} (${socket.id}) en sala ${socket.roomId}: ${message}`);
@@ -433,20 +435,20 @@
             socket.on('disconnect', () => {
                 console.log(`[DESCONEXIÓN] Un usuario se ha desconectado: ${socket.id}`);
                 const disconnectedUsername = players[socket.id] ? players[socket.id].username : socket.id.substring(0,4) + '...';
-                const disconnectedRoomId = socket.roomId; // Obtener roomId de la propiedad del socket
+                const disconnectedRoomId = socket.roomId; // Obtener roomId de la propiedad del socket (si se estableció)
 
                 // Eliminar jugador del objeto global de players
                 const disconnectedPlayer = players[socket.id];
                 delete players[socket.id]; 
 
-                // Si el jugador estaba en una sala, lo elimina de ella
-                if (disconnectedRoomId && rooms[disconnectedRoomId]) {
+                // Si el jugador estaba en una sala Y era un cliente de JUEGO (isGameClient)
+                if (disconnectedRoomId && rooms[disconnectedRoomId] && disconnectedPlayer && disconnectedPlayer.isGameClient) {
                     const room = rooms[disconnectedRoomId];
                     
                     // Eliminar del mapa de jugadores de la sala
                     if (room.players[socket.id]) {
                         delete room.players[socket.id];
-                        console.log(`[SALA] Jugador ${disconnectedUsername} eliminado del mapa de sala ${room.name} (${disconnectedRoomId}).`);
+                        console.log(`[SALA] Cliente de juego ${disconnectedUsername} eliminado del mapa de sala ${room.name} (${disconnectedRoomId}).`);
                     }
 
                     room.lastActivity = Date.now(); // Actualiza actividad de la sala
@@ -454,17 +456,17 @@
                     // Notifica a los demás jugadores en esa sala que alguien se desconectó
                     socket.to(disconnectedRoomId).emit('playerDisconnected', socket.id);
 
-                    // Si la sala se queda vacía, la elimina
+                    // Si la sala se queda vacía de clientes 3D, la elimina
                     if (Object.keys(room.players).length === 0) {
                         delete rooms[disconnectedRoomId];
                         console.log(`[SALA] Sala ${room.name} (${disconnectedRoomId}) vacía y eliminada.`);
-                    } else if (room.hostId === socket.id) {
-                        // Si el host se desconecta, asigna un nuevo host
-                        console.log(`[SALA HOST DESCONECTADO] El host ${disconnectedUsername} de la sala ${room.name} (${disconnectedRoomId}) se desconectó.`);
+                    } else if (room.hostId === socket.id) { // Si el host de la sala era este cliente 3D
+                        // Esto solo debería pasar si el host del menú se desconecta Y era un cliente 3D
+                        console.log(`[SALA HOST DESCONECTADO - CLIENTE 3D] El host ${disconnectedUsername} de la sala ${room.name} (${disconnectedRoomId}) se desconectó.`);
                         const remainingPlayersIds = Object.keys(room.players);
                         if (remainingPlayersIds.length > 0) {
                             const newHostId = remainingPlayersIds[0];
-                            room.hostId = newHostId;
+                            room.hostId = newHostId; // Asigna el primer cliente 3D restante como nuevo host
                             room.hostUsername = players[newHostId] ? players[newHostId].username : 'Desconocido';
                             console.log(`[SALA] Nuevo host de ${room.name} es: ${room.hostUsername} (${newHostId}).`);
                             io.to(disconnectedRoomId).emit('hostChanged', { newHostId: room.hostId, newHostUsername: room.hostUsername });
@@ -472,10 +474,33 @@
                             // Si no quedan jugadores, la sala se elimina
                             cleanupRoom(disconnectedRoomId, 'El anfitrión se desconectó y la sala quedó vacía.');
                         }
+                    } else if (room.hostId === disconnectedPlayer.hostId) { // Si el host era un socket de MENÚ diferente al desconectado
+                        // Nada especial, el host del menú sigue siendo el host.
                     }
-                } else {
-                    // Si el jugador no estaba en una sala, simplemente se elimina
-                    console.log(`[LOBBY] Jugador ${disconnectedUsername} desconectado del lobby.`);
+
+                } else if (disconnectedRoomId && rooms[disconnectedRoomId] && disconnectedPlayer && !disconnectedPlayer.isGameClient) {
+                    // Si el socket desconectado era un cliente de menú que estaba en una sala
+                    console.log(`[LOBBY] Cliente de menú ${disconnectedUsername} desconectado de la sala ${disconnectedRoomId}.`);
+                    // NO lo eliminamos de room.players porque nunca estuvo allí (solo los clientes 3D están).
+                    // Pero si era el host del menú, necesitamos reasignar el host.
+                    const room = rooms[disconnectedRoomId];
+                    if (room.hostId === socket.id) { // Si el socket desconectado era el host original del menú
+                        console.log(`[SALA HOST DESCONECTADO - CLIENTE MENU] El host original ${disconnectedUsername} de la sala ${room.name} (${disconnectedRoomId}) se desconectó.`);
+                        const remainingPlayersIds = Object.keys(room.players); // Busca entre los clientes 3D activos
+                        if (remainingPlayersIds.length > 0) {
+                            const newHostId = remainingPlayersIds[0];
+                            room.hostId = newHostId; // Asigna el primer cliente 3D restante como nuevo host
+                            room.hostUsername = players[newHostId] ? players[newHostId].username : 'Desconocido';
+                            console.log(`[SALA] Nuevo host de ${room.name} es: ${room.hostUsername} (${newHostId}).`);
+                            io.to(disconnectedRoomId).emit('hostChanged', { newHostId: room.hostId, newHostUsername: room.hostUsername });
+                        } else {
+                            cleanupRoom(disconnectedRoomId, 'El anfitrión se desconectó y la sala quedó vacía.');
+                        }
+                    }
+                }
+                else {
+                    // Si el jugador no estaba en una sala o no tenía el objeto players correctamente inicializado
+                    console.log(`[LOBBY] Jugador ${disconnectedUsername} desconectado (no estaba en sala o no era cliente de juego).`);
                 }
 
                 // Envía la lista de salas actualizada a todos los clientes (especialmente al menú)
