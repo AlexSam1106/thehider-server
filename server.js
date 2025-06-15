@@ -117,7 +117,7 @@ io.on('connection', (socket) => {
             flashlightOn: true,
             playerAnimationState: 'idle'
         };
-        players[socket.id].username = username; // Asegura que el objeto players también tenga el nombre de usuario
+        players[socket.id].username = username; // Asegura que el objeto players también tenga el username
 
         // Envía el token de sesión en la respuesta
         socket.emit('usernameValidationResponse', { success: true, message: '¡Perfil guardado correctamente!', userData: userProfiles[socket.id] });
@@ -204,7 +204,7 @@ io.on('connection', (socket) => {
 
         // 1. Si el sessionToken está mapeado a un socket existente...
         if (sessionToken && oldSocketIdForSessionToken) {
-            // ...y ese socket es el actual, significa una reinicialización del mismo lobby.
+            // ...y ese socket es el actual, significa una reinicialización de la misma sesión del lobby.
             if (oldSocketIdForSessionToken === socket.id) {
                 associatedUserProfile = userProfiles[socket.id];
                 console.log(`[LOBBY_INIT] Usuario "${username}" ya mapeado a este socket (${socket.id}) con token ${sessionToken.substring(0,8)}.... Re-inicializando.`);
