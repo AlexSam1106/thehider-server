@@ -196,18 +196,38 @@ io.on('connection', (socket) => {
 
         console.log(`[LOBBY_CONNECT] Recepción de datos iniciales del jugador en Lobby: "${username}" (Socket ID: ${socket.id}).`);
 
-        // Validación más ligera: solo verificar si el socket está asociado a un perfil válido que ya pasó por el menú.
-        const registeredProfile = userProfiles[socket.id];
-        const isSocketAssociatedWithValidProfile = registeredProfile && registeredProfile.username.toLowerCase() === normalizedUsername;
+        // 1. Encontrar el perfil de usuario asociado a este username, sin importar el socket.id
+        let associatedUserProfile = null;
+        let oldSocketIdForUsername = null; // Almacenará el socket.id si encontramos el username en un socket antiguo
+        for (const sId in userProfiles) {
+            if (userProfiles[sId].username.toLowerCase() === normalizedUsername) {
+                associatedUserProfile = userProfiles[sId];
+                oldSocketIdForUsername = sId;
+                break;
+            }
+        }
         
-        // Si no hay perfil asociado o el nombre no coincide (lo que indica un acceso directo o perfil erróneo)
-        if (!isSocketAssociatedWithValidProfile) {
-            const errorMessage = "No autorizado. Accede desde el menú principal.";
+        // 2. Si no se encuentra un perfil para este username (indicando acceso directo sin pasar por menú)
+        if (!associatedUserProfile) {
+            const errorMessage = "No autorizado. Accede desde el menú principal para registrarte o iniciar sesión.";
             console.warn(`[LOBBY_CONNECT] Acceso denegado para ${username || 'N/A'} (Socket ID: ${socket.id}). Motivo: ${errorMessage}`);
             socket.emit('admissionError', errorMessage); // Enviar error al cliente del lobby
             socket.disconnect(true); // Desconectar al cliente no autorizado
             return;
         }
+
+        // 3. Limpiar cualquier registro antiguo del mismo username y transferir el perfil al nuevo socket.id del lobby
+        if (oldSocketIdForUsername && oldSocketIdForUsername !== socket.id) {
+            console.log(`[LOBBY_CONNECT] Transfiriendo perfil de usuario para "${username}" de antiguo socket ${oldSocketIdForUsername} a nuevo socket ${socket.id}.`);
+            // Limpiar datos asociados al socket antiguo (del menú)
+            delete userProfiles[oldSocketIdForUsername];
+            delete players[oldSocketIdForUsername]; // Asegurarse de que no queden datos de juego antiguos
+            // No desconectamos el socket antiguo aquí, ya que es el del menú y podría haberse desconectado o no ser relevante.
+        }
+
+        // Actualizar userProfiles y usernameToSocketId para asociar el perfil con el NUEVO socket.id del lobby
+        userProfiles[socket.id] = associatedUserProfile; // El perfil completo ahora está ligado a este nuevo socket.id
+        usernameToSocketId[normalizedUsername] = socket.id; // Actualizar el mapeo de username a socket ID al nuevo
 
         // Si la validación es exitosa para el lobby, actualizar los datos del jugador en 'players'
         players[socket.id] = {
