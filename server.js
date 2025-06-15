@@ -101,7 +101,8 @@ io.on('connection', (socket) => {
             userProfiles[socket.id] = { username, bio, connectedAt: new Date().toISOString() };
             registeredUsers[lowerCaseUsername] = socket.id; // Guarda la referencia al socket.id
 
-            socket.emit('usernameValidationResponse', { success: true, userData: userProfiles[socket.id] });
+            // AÑADIDO: Incluir mensaje de éxito en la respuesta
+            socket.emit('usernameValidationResponse', { success: true, message: '¡Perfil guardado correctamente!', userData: userProfiles[socket.id] });
             updateAndEmitRoomStats(); // Actualiza el conteo de jugadores conectados
             updateAndEmitServerStats(); // Actualiza estadísticas generales
         }
@@ -154,8 +155,10 @@ io.on('connection', (socket) => {
             players[socket.id].pitchRotation = playerData.pitchRotation;
             players[socket.id].flashlightOn = playerData.flashlightOn;
             players[socket.id].playerAnimationState = playerData.playerAnimationState;
+            // AÑADIDO: Incluir el username si está disponible en userProfiles
+            const username = userProfiles[socket.id] ? userProfiles[socket.id].username : undefined;
 
-            socket.broadcast.emit('playerMoved', { id: socket.id, ...players[socket.id] });
+            socket.broadcast.emit('playerMoved', { id: socket.id, ...players[socket.id], username: username });
         }
     });
 
@@ -170,11 +173,10 @@ io.on('connection', (socket) => {
     socket.on('disconnect', () => {
         console.log('Un usuario se ha desconectado:', socket.id);
 
-        // Eliminar al jugador y su perfil si existen
-        if (players[socket.id]) {
-            delete players[socket.id];
-        }
+        // Almacenar el nombre de usuario antes de eliminarlo del perfil
+        let disconnectedUsername = 'Anónimo';
         if (userProfiles[socket.id]) {
+            disconnectedUsername = userProfiles[socket.id].username;
             const usernameToRemove = userProfiles[socket.id].username.toLowerCase();
             delete userProfiles[socket.id];
             if (registeredUsers[usernameToRemove] === socket.id) {
@@ -182,8 +184,12 @@ io.on('connection', (socket) => {
             }
         }
         
-        // Envía el ID del jugador desconectado a los demás para que lo eliminen de la escena
-        io.emit('playerDisconnected', socket.id);
+        if (players[socket.id]) {
+            delete players[socket.id];
+        }
+        
+        // Envía el ID y el nombre de usuario del jugador desconectado a los demás para que lo eliminen de la escena
+        io.emit('playerDisconnected', { id: socket.id, username: disconnectedUsername });
 
         updateAndEmitRoomStats(); // Actualiza el conteo de jugadores
         updateAndEmitServerStats(); // Actualiza estadísticas generales
