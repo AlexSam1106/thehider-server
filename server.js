@@ -37,8 +37,6 @@ let serverStats = {
 
 // Función para actualizar y emitir estadísticas de la sala global
 function updateAndEmitRoomStats() {
-    // currentPlayers debería ser el número de jugadores que han pasado por el menú y están "en el lobby"
-    // Esto se refleja mejor en cuántos perfiles de usuario tenemos activos.
     globalRoomStats.currentPlayers = Object.keys(userProfiles).length;
     io.emit('roomStatsUpdate', globalRoomStats);
     console.log(`Estadísticas de sala actualizadas: Jugadores conectados: ${globalRoomStats.currentPlayers}`);
@@ -74,28 +72,7 @@ io.on('connection', (socket) => {
         username: 'Cargando...' // Valor temporal hasta que se envíe el nombre
     };
 
-    // Envía a los jugadores actuales al nuevo jugador
-    const playersWithIdsAndUsernames = {};
-    for (const playerId in players) {
-        // Combinar datos del jugador (posición, etc.) con los datos del perfil de usuario (username, bio)
-        const playerGameData = players[playerId];
-        const userProfileData = userProfiles[playerId] || {}; // Obtener perfil, si existe
-
-        playersWithIdsAndUsernames[playerId] = { 
-            id: playerId, 
-            ...playerGameData, 
-            username: userProfileData.username || playerGameData.username, // Usar el nombre del perfil si existe, sino el temporal
-            bio: userProfileData.bio || '' 
-        };
-    }
-    // No enviar 'currentPlayers' inmediatamente al conectar. Se enviará después de la validación del usuario en playerConnectedWithUser.
-    // socket.emit('currentPlayers', playersWithIdsAndUsernames);
-    
-    // NO emitir 'playerMoved' aquí al conectar, el 'playerConnectedWithUser' del cliente lo hará.
-    // socket.broadcast.emit('playerMoved', { id: socket.id, ...players[socket.id] });
-
     // Actualiza las estadísticas al conectar (antes de que el usuario se registre)
-    // El 'currentPlayers' en roomStatsUpdate solo se incrementará cuando el usuario se registre su nombre.
     updateAndEmitRoomStats();
     updateAndEmitServerStats();
 
@@ -161,88 +138,67 @@ io.on('connection', (socket) => {
         updateAndEmitServerStats();
     });
 
-    // --- Manejo de la conexión inicial al lobby del juego (desde multiplayer_lobby_server.html) ---
-    // Este es el punto de control clave para el acceso al juego.
-    socket.on('playerConnectedWithUser', (playerData) => {
-        const { id, username, bio, position, rotation, pitchRotation, flashlightOn, playerAnimationState } = playerData;
+    // --- ¡LA PARTE QUE FALTABA Y ES CLAVE! Manejo de la solicitud de unión al Lobby Global (desde multiplayer_menu.html) ---
+    socket.on('joinGlobalLobby', (data) => {
+        const { username } = data;
         const normalizedUsername = username.toLowerCase();
 
+        console.log(`[JOIN_LOBBY] Solicitud de unión a Lobby Global de "${username}" (Socket ID: ${socket.id}).`);
+
         // 1. Verificar si el username está registrado en userProfiles Y si el socket.id actual coincide.
-        const registeredProfile = userProfiles[id];
+        // Esto valida que la sesión de este socket es la que el menú intentó registrar.
+        const registeredProfile = userProfiles[socket.id];
         const isUsernameAssignedToThisSocket = registeredProfile && registeredProfile.username.toLowerCase() === normalizedUsername;
 
         // 2. Verificar si el username está en usernameToSocketId Y si el socket.id asociado es diferente al actual (sesión duplicada).
-        const isUsernameTakenByAnotherSocket = usernameToSocketId[normalizedUsername] && usernameToSocketId[normalizedUsername] !== id;
+        const isUsernameTakenByAnotherSocket = usernameToSocketId[normalizedUsername] && usernameToSocketId[normalizedUsername] !== socket.id;
 
         if (!username || !isUsernameAssignedToThisSocket || isUsernameTakenByAnotherSocket) {
             let errorMessage = '';
             if (!username) {
                 errorMessage = 'No se proporcionó un nombre de usuario válido.';
             } else if (!registeredProfile) {
-                errorMessage = 'Usuario no registrado. Por favor, regístrate en el menú principal.';
+                errorMessage = 'Usuario no registrado para esta sesión. Por favor, regístrate en el menú principal.';
             } else if (registeredProfile.username.toLowerCase() !== normalizedUsername) {
                 errorMessage = `El usuario "${username}" no coincide con el perfil registrado para esta sesión.`;
             } else if (isUsernameTakenByAnotherSocket) {
-                errorMessage = `El nombre de usuario "${username}" ya está en uso por otra sesión activa. Por favor, cierra la otra instancia o cambia de usuario.`;
-                // Opcional: Desconectar la sesión antigua aquí también si se quiere forzar una sesión única
+                errorMessage = `El nombre de usuario "${username}" ya está en uso por otra sesión activa. Tu sesión anterior ha sido cerrada.`;
+                // Desconectar la sesión antigua
                 const oldSocket = io.sockets.sockets.get(usernameToSocketId[normalizedUsername]);
                 if (oldSocket) {
                     oldSocket.emit('admissionError', 'Tu sesión ha sido cerrada porque te conectaste desde otra ubicación.');
                     oldSocket.disconnect(true);
                 }
             }
-            console.warn(`Admisión denegada para ${username || 'N/A'} (Socket ID: ${id}). Motivo: ${errorMessage}`);
-            socket.emit('admissionError', errorMessage); // Enviar error al cliente del lobby
+            console.warn(`[JOIN_LOBBY] Admisión denegada para ${username || 'N/A'} (Socket ID: ${socket.id}). Motivo: ${errorMessage}`);
+            socket.emit('admissionError', errorMessage); // Enviar error al cliente del menú
             return; // Detener el procesamiento
         }
 
-        // Si la validación es exitosa, actualizar datos y confirmar admisión
-        players[socket.id] = {
-            position: position,
-            rotation: rotation,
-            pitchRotation: pitchRotation,
-            flashlightOn: flashlightOn,
-            playerAnimationState: playerAnimationState,
-            username: username // Asegurar que el username se guarda en 'players'
-        };
+        // Si la validación es exitosa, se considera que el usuario puede entrar al lobby
+        // Aquí no se necesita actualizar la posición inicial, eso lo hará el cliente del lobby
+        // al cargar el mundo 3D y emitir su posición inicial (si es que aún lo necesita).
 
-        // Enviar al cliente que la admisión fue exitosa
-        socket.emit('admissionSuccess');
-        console.log(`Admisión exitosa para ${username} (Socket ID: ${id}).`);
+        // Enviar al cliente que la admisión fue exitosa (esto redirigirá el cliente a multiplayer_lobby_server.html)
+        socket.emit('admissionSuccess'); // Este evento es escuchado por multiplayer_menu.html para redirigir
+        console.log(`[JOIN_LOBBY] Admisión exitosa al Lobby Global para ${username} (Socket ID: ${socket.id}).`);
 
-        // Enviar a todos los clientes (incluyendo el recién conectado) los jugadores actuales
-        const currentPlayersData = {};
-        for (const playerId in players) {
-            const playerGameData = players[playerId];
-            const userProfileData = userProfiles[playerId] || {}; // Obtener perfil, si existe
-
-            currentPlayersData[playerId] = { 
-                id: playerId, 
-                ...playerGameData, 
-                username: userProfileData.username || playerGameData.username,
-                bio: userProfileData.bio || '' 
-            };
-        }
-        io.emit('currentPlayers', currentPlayersData); // Emitir a TODOS los clientes activos
-
-        // Emitir a todos los demás clientes (excepto al recién conectado) que un nuevo jugador se ha unido
-        socket.broadcast.emit('playerMoved', { 
-            id: socket.id, 
-            ...players[socket.id], 
-            username: username 
-        }); // Enviar el username con el playerData
-
-        updateAndEmitRoomStats(); // Actualiza el conteo de jugadores
-        updateAndEmitServerStats(); // Actualiza estadísticas generales
+        // A esta altura, el cliente del menú redirigirá a multiplayer_lobby_server.html.
+        // Cuando multiplayer_lobby_server.html se cargue, establecerá su propio socket de nuevo
+        // y el servidor gestionará su presencia en la sala a través del flujo normal de 'playerMoved'.
     });
 
 
-    // Cuando un jugador se mueve
+    // Cuando un jugador se mueve (este evento es manejado por multiplayer_lobby_server.html)
     socket.on('playerMoved', (playerData) => {
         if (!userProfiles[socket.id]) { // Ignorar movimientos si el usuario no está registrado/validado
-            console.warn(`Movimiento ignorado para socket ${socket.id}: Usuario no validado.`);
+            console.warn(`[PLAYER_MOVED] Movimiento ignorado para socket ${socket.id}: Usuario no validado para juego.`);
             return; 
         }
+
+        // Asegurarse de que playerData tenga un ID de socket.
+        // Si el cliente no lo envía (lo cual no debería pasar con el código actual), añadirlo.
+        playerData.id = socket.id;
 
         if (players[socket.id]) {
             players[socket.id].position = playerData.position;
@@ -250,31 +206,55 @@ io.on('connection', (socket) => {
             players[socket.id].pitchRotation = playerData.pitchRotation;
             players[socket.id].flashlightOn = playerData.flashlightOn;
             players[socket.id].playerAnimationState = playerData.playerAnimationState;
-            // Aseguramos que el username siempre venga del perfil registrado para este socket
-            players[socket.id].username = userProfiles[socket.id].username;
+            players[socket.id].username = userProfiles[socket.id].username; // Asegurar que el username venga del perfil registrado
 
-            socket.broadcast.emit('playerMoved', { 
+            // Combinar datos de juego con datos de perfil para enviar al resto
+            const dataToSend = { 
                 id: socket.id, 
                 ...players[socket.id], 
-                username: players[socket.id].username // Aseguramos enviar el username
-            });
+                username: userProfiles[socket.id].username,
+                bio: userProfiles[socket.id].bio || '' 
+            };
+            socket.broadcast.emit('playerMoved', dataToSend);
+        } else {
+             // Este es un caso donde el jugador no estaba en el objeto 'players' pero está moviéndose.
+             // Podría pasar si se reconecta al lobby sin pasar por el flujo completo de validación.
+             // Aquí se puede añadir una lógica para inicializarlo, pero idealmente, debería pasar por 'joinGlobalLobby'
+             // o ser añadido por 'currentPlayers' después de que se cargue la página del lobby.
+             console.warn(`[PLAYER_MOVED] Jugador ${socket.id} intentó moverse pero no está en el objeto 'players'. Re-inicializando.`);
+             players[socket.id] = {
+                position: playerData.position,
+                rotation: playerData.rotation,
+                pitchRotation: playerData.pitchRotation,
+                flashlightOn: playerData.flashlightOn,
+                playerAnimationState: playerData.playerAnimationState,
+                username: userProfiles[socket.id].username || 'Desconocido'
+             };
+             // Después de re-inicializar, emitir a todos para que sepan que este jugador "apareció"
+             const dataToSend = { 
+                id: socket.id, 
+                ...players[socket.id], 
+                username: userProfiles[socket.id].username,
+                bio: userProfiles[socket.id].bio || '' 
+            };
+            io.emit('playerMoved', dataToSend); // Usar io.emit para que lo reciba también el remitente
         }
     });
 
     // Cuando un jugador envía un mensaje de chat
     socket.on('chatMessage', (data) => {
         if (!userProfiles[socket.id]) { // Ignorar chat si el usuario no está registrado/validado
-            console.warn(`Mensaje de chat ignorado para socket ${socket.id}: Usuario no validado.`);
+            console.warn(`[CHAT] Mensaje de chat ignorado para socket ${socket.id}: Usuario no validado.`);
             return;
         }
         const senderName = userProfiles[socket.id].username; // Usar el nombre del perfil registrado
-        console.log(`Mensaje de chat de ${senderName} (${socket.id}): ${data.text}`);
+        console.log(`[CHAT] Mensaje de chat de ${senderName} (${socket.id}): ${data.text}`);
         io.emit('chatMessage', { senderId: socket.id, senderName: senderName, text: data.text });
     });
 
     // Manejo de desconexión
     socket.on('disconnect', () => {
-        console.log('Un usuario se ha desconectado:', socket.id);
+        console.log('[DISCONNECT] Un usuario se ha desconectado:', socket.id);
 
         let disconnectedUsername = 'Anónimo';
         const userProfile = userProfiles[socket.id];
@@ -307,7 +287,7 @@ io.on('connection', (socket) => {
             if (usernameToSocketId[usernameToClear] === socket.id) {
                  delete usernameToSocketId[usernameToClear];
             }
-            console.log(`Usuario ${usernameToClear} ha cerrado sesión.`);
+            console.log(`[LOGOUT] Usuario ${usernameToClear} ha cerrado sesión.`);
             updateAndEmitRoomStats();
             updateAndEmitServerStats();
         }
