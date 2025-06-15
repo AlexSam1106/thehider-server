@@ -16,9 +16,18 @@ const io = new Server(server, {
 // Este servidor SOLO manejará las conexiones de Socket.IO.
 
 const players = {}; // Almacena el estado de los jugadores por socket.id (datos de juego como posición, rotación, animación)
-const userProfiles = {}; // Almacena el perfil completo del usuario { socket.id: { username, bio, connectedAt } }
+const userProfiles = {}; // Almacena el perfil completo del usuario { socket.id: { username, bio, connectedAt, sessionToken } }
 // Para un mapeo rápido de username a socket.id para verificación de unicidad de sesión
 const usernameToSocketId = {}; // { normalizedUsername: socket.id }
+// Nuevo mapeo para sessionToken a socket.id, esencial para re-asociar perfiles.
+const sessionTokenToSocketId = {}; // { sessionToken: socket.id }
+
+// Función para generar un token de sesión simple (para esta demo)
+// En un entorno de producción, usarías UUIDs más seguros o JWTs.
+function generateSessionToken() {
+    return Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+}
+
 
 let globalRoomStats = {
     currentPlayers: 0,
@@ -83,16 +92,22 @@ io.on('connection', (socket) => {
             return;
         }
 
-        // Si el nombre de usuario ya está registrado en *este* socket, solo actualiza el perfil.
+        let currentSessionToken = null;
+        // Si el usuario ya está registrado en *este* socket (ej. refrescó la página y volvió a registrarse), mantén su token.
         if (userProfiles[socket.id] && userProfiles[socket.id].username.toLowerCase() === normalizedUsername) {
             userProfiles[socket.id].bio = bio; // Actualiza la bio
+            currentSessionToken = userProfiles[socket.id].sessionToken; // Recupera el token existente
             console.log(`[REGISTER] Perfil existente para "${username}" (Socket ID: ${socket.id}) actualizado.`);
         } else {
-            // Nuevo registro para este socket.
-            userProfiles[socket.id] = { username, bio, connectedAt: new Date().toISOString() };
-            console.log(`[REGISTER] Nuevo perfil para "${username}" (Socket ID: ${socket.id}) creado.`);
+            // Nuevo registro para este socket. Genera un nuevo token de sesión.
+            currentSessionToken = generateSessionToken();
+            userProfiles[socket.id] = { username, bio, connectedAt: new Date().toISOString(), sessionToken: currentSessionToken };
+            console.log(`[REGISTER] Nuevo perfil para "${username}" (Socket ID: ${socket.id}) creado con token: ${currentSessionToken.substring(0,8)}...`);
         }
-        usernameToSocketId[normalizedUsername] = socket.id; // Mapea el nombre de usuario a este ID de socket
+        
+        // Actualiza los mapeos
+        usernameToSocketId[normalizedUsername] = socket.id;
+        sessionTokenToSocketId[currentSessionToken] = socket.id;
 
         // Inicializa/actualiza los datos del jugador en el objeto 'players' (importante para el estado del juego)
         players[socket.id] = players[socket.id] || {
@@ -104,6 +119,7 @@ io.on('connection', (socket) => {
         };
         players[socket.id].username = username; // Asegura que el objeto players también tenga el nombre de usuario
 
+        // Envía el token de sesión en la respuesta
         socket.emit('usernameValidationResponse', { success: true, message: '¡Perfil guardado correctamente!', userData: userProfiles[socket.id] });
         updateAndEmitRoomStats();
         updateAndEmitServerStats();
@@ -112,15 +128,15 @@ io.on('connection', (socket) => {
     // --- Manejo de reconexión de usuario (desde multiplayer_menu.html) ---
     // Esto ocurre si el usuario ya tenía un perfil y actualiza el menú
     socket.on('userReconnected', (data) => {
-        const { username, bio } = data;
+        const { username, bio, sessionToken } = data; // Recibe el sessionToken
         const normalizedUsername = username.toLowerCase();
 
-        console.log(`[RECONNECT_MENU] Usuario "${username}" intentando reconectar desde menú (Socket ID: ${socket.id}).`);
+        console.log(`[RECONNECT_MENU] Usuario "${username}" (Token: ${sessionToken ? sessionToken.substring(0,8) + '...' : 'N/A'}) intentando reconectar desde menú (Socket ID: ${socket.id}).`);
 
-        // Si el nombre de usuario ya está mapeado a un ID de socket *diferente* y activo, desconecta la sesión antigua.
-        if (usernameToSocketId[normalizedUsername] && usernameToSocketId[normalizedUsername] !== socket.id) {
-            const oldSocketId = usernameToSocketId[normalizedUsername];
-            console.log(`[RECONNECT_MENU] Usuario "${username}" estaba previamente conectado con socket ID ${oldSocketId}. Desconectando sesión antigua.`);
+        // Si el token de sesión ya está mapeado a un ID de socket *diferente* y activo, desconecta la sesión antigua.
+        if (sessionToken && sessionTokenToSocketId[sessionToken] && sessionTokenToSocketId[sessionToken] !== socket.id) {
+            const oldSocketId = sessionTokenToSocketId[sessionToken];
+            console.log(`[RECONNECT_MENU] Token ${sessionToken.substring(0,8)}... estaba previamente conectado con socket ID ${oldSocketId}. Desconectando sesión antigua.`);
             const oldSocket = io.sockets.sockets.get(oldSocketId);
             if (oldSocket) {
                 oldSocket.emit('admissionError', 'Te has conectado desde otra ubicación. Tu sesión anterior ha sido cerrada.');
@@ -130,13 +146,15 @@ io.on('connection', (socket) => {
         }
         
         // Asocia el perfil de usuario con el nuevo socket.id del menú
-        // Si el perfil existe para este socket, actualízalo. Si no, créalo.
         userProfiles[socket.id] = userProfiles[socket.id] || {};
         userProfiles[socket.id].username = username;
         userProfiles[socket.id].bio = bio;
         userProfiles[socket.id].connectedAt = new Date().toISOString();
-        
-        usernameToSocketId[normalizedUsername] = socket.id; // Mapea el nombre de usuario a este ID de socket
+        userProfiles[socket.id].sessionToken = sessionToken || generateSessionToken(); // Usa el token existente o genera uno nuevo
+
+        // Actualiza los mapeos
+        usernameToSocketId[normalizedUsername] = socket.id;
+        sessionTokenToSocketId[userProfiles[socket.id].sessionToken] = socket.id;
 
         // Asegura que los datos del jugador existan y tengan el nombre de usuario
         players[socket.id] = players[socket.id] || {
@@ -151,19 +169,19 @@ io.on('connection', (socket) => {
 
     // --- Manejo de la solicitud de unión al Lobby Global (desde multiplayer_menu.html) ---
     socket.on('joinGlobalLobby', (data) => {
-        const { username } = data;
+        const { username, sessionToken } = data; // Recibe el sessionToken
         const normalizedUsername = username.toLowerCase();
 
-        console.log(`[JOIN_LOBBY] Solicitud de unión a Lobby Global de "${username}" (Socket ID: ${socket.id}).`);
+        console.log(`[JOIN_LOBBY] Solicitud de unión a Lobby Global de "${username}" (Token: ${sessionToken ? sessionToken.substring(0,8) + '...' : 'N/A'}) (Socket ID: ${socket.id}).`);
 
-        // Verifica que el socket actual esté asociado con el perfil de usuario.
-        // Si el usuario intentó un copy-paste directo, el socket.id del lobby no tendrá un userProfile asociado
-        // o el nombre de usuario no coincidirá con el registrado para este socket.id.
+        // Verifica que el socket actual esté asociado con el perfil de usuario Y que el sessionToken coincida.
         const registeredProfile = userProfiles[socket.id];
-        const isUsernameAssignedToThisSocket = registeredProfile && registeredProfile.username.toLowerCase() === normalizedUsername;
+        const isSessionValidForThisSocket = registeredProfile 
+                                         && registeredProfile.username.toLowerCase() === normalizedUsername
+                                         && registeredProfile.sessionToken === sessionToken;
 
-        if (!username || !isUsernameAssignedToThisSocket) {
-            let errorMessage = 'No autorizado. Accede desde el menú principal para registrarte o iniciar sesión.';
+        if (!username || !sessionToken || !isSessionValidForThisSocket) {
+            let errorMessage = 'No autorizado. Accede desde el menú principal para registrarte o iniciar sesión con una sesión válida.';
             console.warn(`[JOIN_LOBBY] Admisión denegada para ${username || 'N/A'} (Socket ID: ${socket.id}). Motivo: ${errorMessage}`);
             socket.emit('admissionError', errorMessage); // Envía el error al cliente del menú
             return; // Detiene el procesamiento
@@ -176,48 +194,57 @@ io.on('connection', (socket) => {
 
     // --- OYENTE CRÍTICO PARA EL LOBBY 3D: Maneja la conexión desde multiplayer_lobby_server.html ---
     socket.on('playerConnectedWithUser', (playerData) => {
-        const { username, bio, position, rotation, pitchRotation, flashlightOn, playerAnimationState } = playerData;
+        const { username, bio, sessionToken, position, rotation, pitchRotation, flashlightOn, playerAnimationState } = playerData;
         const normalizedUsername = username.toLowerCase();
 
-        console.log(`[LOBBY_INIT] Nuevo socket del lobby conectado: "${username}" (Socket ID: ${socket.id}). Datos recibidos:`, playerData);
+        console.log(`[LOBBY_INIT] Nuevo socket del lobby conectado: "${username}" (Token: ${sessionToken ? sessionToken.substring(0,8) + '...' : 'N/A'}) (Socket ID: ${socket.id}).`);
 
         let associatedUserProfile = null;
-        let oldSocketIdForUsername = usernameToSocketId[normalizedUsername];
+        let oldSocketIdForSessionToken = sessionTokenToSocketId[sessionToken];
 
-        // 1. Verifica si existe un mapeo para este nombre de usuario.
-        if (oldSocketIdForUsername) {
-            // Si el mapeo existente apunta al socket ACTUAL, es una reinicialización de la misma sesión del lobby.
-            if (oldSocketIdForUsername === socket.id) {
+        // 1. Si el sessionToken está mapeado a un socket existente...
+        if (sessionToken && oldSocketIdForSessionToken) {
+            // ...y ese socket es el actual, significa una reinicialización del mismo lobby.
+            if (oldSocketIdForSessionToken === socket.id) {
                 associatedUserProfile = userProfiles[socket.id];
-                console.log(`[LOBBY_INIT] Usuario "${username}" ya mapeado a este socket (${socket.id}). Re-inicializando.`);
+                console.log(`[LOBBY_INIT] Usuario "${username}" ya mapeado a este socket (${socket.id}) con token ${sessionToken.substring(0,8)}.... Re-inicializando.`);
             } else {
-                // El nombre de usuario está mapeado a un socket *diferente* (probablemente el socket del menú que acaba de redirigir).
+                // ...y es un socket *diferente*, significa que el perfil se ha transferido.
                 // Reclama el perfil de ese socket antiguo.
-                associatedUserProfile = userProfiles[oldSocketIdForUsername];
+                associatedUserProfile = userProfiles[oldSocketIdForSessionToken];
                 if (associatedUserProfile) {
-                    console.log(`[LOBBY_INIT] Transfiriendo perfil de usuario para "${username}" de socket antiguo (${oldSocketIdForUsername}) a nuevo socket (${socket.id}).`);
+                    console.log(`[LOBBY_INIT] Transfiriendo perfil de usuario para "${username}" (Token: ${sessionToken.substring(0,8)}...) de socket antiguo (${oldSocketIdForSessionToken}) a nuevo socket (${socket.id}).`);
                     // Limpia las entradas del socket antiguo (perfil, datos del jugador)
-                    delete userProfiles[oldSocketIdForUsername];
-                    delete players[oldSocketIdForUsername];
+                    delete userProfiles[oldSocketIdForSessionToken];
+                    delete players[oldSocketIdForSessionToken];
                     // Además, desconecta explícitamente el socket antiguo si sigue activo (ej. la página del menú no ha cerrado completamente su socket todavía)
-                    const oldSocket = io.sockets.sockets.get(oldSocketIdForUsername);
+                    const oldSocket = io.sockets.sockets.get(oldSocketIdForSessionToken);
                     if (oldSocket) {
                         oldSocket.emit('admissionError', 'Tu sesión ha sido transferida a una nueva ventana de juego. Si esta no eres tú, por favor, reconecta.');
                         oldSocket.disconnect(true);
                     }
                 } else {
-                    // Este escenario significa que usernameToSocketId tenía una entrada, pero userProfiles[oldSocketIdForUsername] no.
-                    // Esto implica una entrada obsoleta, así que la borramos.
-                    delete usernameToSocketId[normalizedUsername];
-                    console.warn(`[LOBBY_INIT] Mapeo de usuario "${username}" a socket ${oldSocketIdForUsername} estaba obsoleto. Borrando mapeo.`);
+                    // Este escenario significa que sessionTokenToSocketId tenía una entrada, pero userProfiles[oldSocketIdForSessionToken] no.
+                    // Implica una entrada obsoleta, así que la borramos.
+                    delete sessionTokenToSocketId[sessionToken];
+                    console.warn(`[LOBBY_INIT] Mapeo de sesión "${sessionToken.substring(0,8)}..." a socket ${oldSocketIdForSessionToken} estaba obsoleto. Borrando mapeo.`);
                 }
             }
         }
 
-        // Si no se encontró un perfil por nombre de usuario (incluso después de revisar el mapeo antiguo)
-        if (!associatedUserProfile) {
-            const errorMessage = "No autorizado. Accede desde el menú principal para registrarte o iniciar sesión.";
-            console.warn(`[LOBBY_INIT] Acceso denegado para "${username}" (Socket ID: ${socket.id}). Motivo: ${errorMessage}`);
+        // Si no se encontró un perfil válido por sessionToken (o no se proporcionó un token)
+        if (!sessionToken || !associatedUserProfile || associatedUserProfile.username.toLowerCase() !== normalizedUsername) {
+            const errorMessage = "No autorizado. Accede desde el menú principal para registrarte o iniciar sesión con una sesión válida.";
+            console.warn(`[LOBBY_INIT] Acceso denegado para "${username}" (Token: ${sessionToken ? sessionToken.substring(0,8) + '...' : 'N/A'}) (Socket ID: ${socket.id}). Motivo: ${errorMessage}`);
+            socket.emit('admissionError', errorMessage);
+            socket.disconnect(true);
+            return;
+        }
+
+        // Si el username de la data no coincide con el username del perfil asociado (por token), también denegar
+        if (associatedUserProfile.username.toLowerCase() !== normalizedUsername) {
+            const errorMessage = "Discrepancia de usuario. Acceso denegado.";
+            console.warn(`[LOBBY_INIT] Discrepancia de usuario para token ${sessionToken.substring(0,8)}... (Solicitado: ${username}, Registrado: ${associatedUserProfile.username}). Acceso denegado.`);
             socket.emit('admissionError', errorMessage);
             socket.disconnect(true);
             return;
@@ -228,7 +255,10 @@ io.on('connection', (socket) => {
         // Asegura que la bio se actualice si se proporciona (el menú podría enviarla actualizada)
         if (bio) userProfiles[socket.id].bio = bio; 
         userProfiles[socket.id].connectedAt = new Date().toISOString(); // Actualiza el tiempo de conexión
-        usernameToSocketId[normalizedUsername] = socket.id; // Crucial, actualiza el mapeo global
+
+        // Actualiza los mapeos para el nuevo socket.id
+        usernameToSocketId[normalizedUsername] = socket.id;
+        sessionTokenToSocketId[sessionToken] = socket.id;
 
         // Inicializa/actualiza los datos del jugador para este nuevo socket.id
         players[socket.id] = {
@@ -338,13 +368,16 @@ io.on('connection', (socket) => {
         if (userProfile) {
             disconnectedUsername = userProfile.username;
             const normalizedUsername = userProfile.username.toLowerCase();
+            const sessionToken = userProfile.sessionToken;
             
-            // Solo elimina el mapeo del nombre de usuario si este socket que se desconecta era el que actualmente tenía ese nombre de usuario.
+            // Solo elimina el mapeo de username y sessionToken si este socket que se desconecta era el que actualmente los poseía.
             if (usernameToSocketId[normalizedUsername] === socket.id) {
-                delete usernameToSocketId[normalizedUsername]; // Elimina el mapeo
+                delete usernameToSocketId[normalizedUsername];
                 console.log(`[DISCONNECT] Mapeo de usuario "${disconnectedUsername}" eliminado ya que su socket activo (${socket.id}) se desconectó.`);
-            } else {
-                console.log(`[DISCONNECT] Socket ${socket.id} para "${disconnectedUsername}" se desconectó, pero otro socket activo posee este nombre de usuario. No hay cambio de mapeo.`);
+            }
+            if (sessionToken && sessionTokenToSocketId[sessionToken] === socket.id) {
+                delete sessionTokenToSocketId[sessionToken];
+                console.log(`[DISCONNECT] Mapeo de token "${sessionToken.substring(0,8)}..." eliminado ya que su socket activo (${socket.id}) se desconectó.`);
             }
             // Elimina siempre la entrada de perfil específica del socket.
             delete userProfiles[socket.id]; 
@@ -370,11 +403,17 @@ io.on('connection', (socket) => {
     socket.on('userLoggedOut', () => {
         if (userProfiles[socket.id]) {
             const usernameToClear = userProfiles[socket.id].username.toLowerCase();
+            const sessionTokenToClear = userProfiles[socket.id].sessionToken;
+
             delete userProfiles[socket.id];
+            
             if (usernameToSocketId[usernameToClear] === socket.id) {
                  delete usernameToSocketId[usernameToClear];
             }
-            console.log(`[LOGOUT] Usuario ${usernameToClear} ha cerrado sesión.`);
+            if (sessionTokenToClear && sessionTokenToSocketId[sessionTokenToClear] === socket.id) {
+                 delete sessionTokenToSocketId[sessionTokenToClear];
+            }
+            console.log(`[LOGOUT] Usuario ${usernameToClear} (Token: ${sessionTokenToClear ? sessionTokenToClear.substring(0,8) + '...' : 'N/A'}) ha cerrado sesión.`);
             updateAndEmitRoomStats();
             updateAndEmitServerStats();
         }
