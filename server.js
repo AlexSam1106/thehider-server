@@ -15,9 +15,10 @@ const io = new Server(server, {
 // NO HAY LÍNEAS DE app.use(express.static) O app.get('/') AQUÍ.
 // Este servidor SOLO manejará las conexiones de Socket.IO.
 
-const players = {}; // Almacena el estado de los jugadores por socket.id
-const registeredUsers = {}; // Almacena los nombres de usuario registrados { username: socket.id }
+const players = {}; // Almacena el estado de los jugadores por socket.id (datos de juego como posición, rotación, animación)
 const userProfiles = {}; // Almacena el perfil completo del usuario { socket.id: { username, bio, connectedAt } }
+// Para un mapeo rápido de username a socket.id para verificación de unicidad de sesión
+const usernameToSocketId = {}; // { normalizedUsername: socket.id }
 
 let globalRoomStats = {
     currentPlayers: 0,
@@ -26,9 +27,9 @@ let globalRoomStats = {
 };
 
 let serverStats = {
-    activePlayers: 0, // Jugadores actualmente conectados al servidor
-    activeRooms: 0,   // Salas de juego activas
-    gamesInProgress: 0, // Partidas en curso
+    activePlayers: 0, // Jugadores actualmente conectados al servidor (basado en 'players' object)
+    activeRooms: 0,   // Salas de juego activas (lógica a implementar si hay múltiples salas)
+    gamesInProgress: 0, // Partidas en curso (lógica a implementar)
     avgTime: "08:45",   // Tiempo promedio de juego en el servidor
     topHunter: "ShadowHunter", // Mejor cazador (hardcoded por ahora)
     latency: 0 // Se calculará con un ping simple
@@ -36,21 +37,22 @@ let serverStats = {
 
 // Función para actualizar y emitir estadísticas de la sala global
 function updateAndEmitRoomStats() {
-    globalRoomStats.currentPlayers = Object.keys(userProfiles).length; // Número de usuarios con perfil cargado
+    // currentPlayers debería ser el número de jugadores que han pasado por el menú y están "en el lobby"
+    // Esto se refleja mejor en cuántos perfiles de usuario tenemos activos.
+    globalRoomStats.currentPlayers = Object.keys(userProfiles).length;
     io.emit('roomStatsUpdate', globalRoomStats);
+    console.log(`Estadísticas de sala actualizadas: Jugadores conectados: ${globalRoomStats.currentPlayers}`);
 }
 
 // Función para actualizar y emitir estadísticas generales del servidor
 function updateAndEmitServerStats() {
-    serverStats.activePlayers = Object.keys(players).length; // Jugadores conectados via socket
-    // Aquí podrías añadir lógica para calcular activeRooms y gamesInProgress si tuvieras un sistema de salas más complejo.
-    // Por ahora, usamos valores ficticios o simplemente los que ya tiene si no hay lógica para actualizar.
+    serverStats.activePlayers = Object.keys(players).length; // Cantidad de sockets conectados
+    // Aquí puedes añadir lógica para calcular activeRooms y gamesInProgress si tuvieras un sistema de salas más complejo.
+    // Por ahora, estos pueden seguir siendo valores ficticios o simplemente los que ya tiene.
     
-    // Calcular latencia simple (esto es muy básico y no es una latencia real precisa)
-    // Para una latencia real se necesitaría un mecanismo de ping/pong
     serverStats.latency = Math.floor(Math.random() * 50) + 20; // Simula latencia entre 20ms y 70ms
-
     io.emit('serverStatsUpdate', serverStats);
+    console.log(`Estadísticas de servidor actualizadas: Sockets activos: ${serverStats.activePlayers}`);
 }
 
 // Actualizar estadísticas cada cierto intervalo
@@ -61,134 +63,236 @@ setInterval(updateAndEmitServerStats, 10000); // Cada 10 segundos
 io.on('connection', (socket) => {
     console.log('Un usuario se ha conectado:', socket.id);
 
-    // Inicializar jugador en 'players' (para el juego 3D, si se usa)
+    // Inicializar jugador en 'players' (para el juego 3D)
+    // Su posición inicial será actualizada por el cliente al cargar el lobby
     players[socket.id] = {
         position: { x: 0, y: 0.27, z: 0 },
         rotation: 0,
         pitchRotation: 0,
         flashlightOn: true,
-        playerAnimationState: 'idle'
+        playerAnimationState: 'idle',
+        username: 'Cargando...' // Valor temporal hasta que se envíe el nombre
     };
 
-    // Envía a los jugadores actuales al nuevo jugador (si aplica a tu lógica de juego 3D)
-    const playersWithIds = {};
+    // Envía a los jugadores actuales al nuevo jugador
+    const playersWithIdsAndUsernames = {};
     for (const playerId in players) {
-        playersWithIds[playerId] = { id: playerId, ...players[playerId] };
+        // Combinar datos del jugador (posición, etc.) con los datos del perfil de usuario (username, bio)
+        const playerGameData = players[playerId];
+        const userProfileData = userProfiles[playerId] || {}; // Obtener perfil, si existe
+
+        playersWithIdsAndUsernames[playerId] = { 
+            id: playerId, 
+            ...playerGameData, 
+            username: userProfileData.username || playerGameData.username, // Usar el nombre del perfil si existe, sino el temporal
+            bio: userProfileData.bio || '' 
+        };
     }
-    socket.emit('currentPlayers', playersWithIds);
+    // No enviar 'currentPlayers' inmediatamente al conectar. Se enviará después de la validación del usuario en playerConnectedWithUser.
+    // socket.emit('currentPlayers', playersWithIdsAndUsernames);
+    
+    // NO emitir 'playerMoved' aquí al conectar, el 'playerConnectedWithUser' del cliente lo hará.
+    // socket.broadcast.emit('playerMoved', { id: socket.id, ...players[socket.id] });
 
-    // Envía el nuevo jugador (con su ID) a los otros jugadores
-    socket.broadcast.emit('playerMoved', { id: socket.id, ...players[socket.id] });
-
-    // Actualiza las estadísticas al conectar
+    // Actualiza las estadísticas al conectar (antes de que el usuario se registre)
+    // El 'currentPlayers' en roomStatsUpdate solo se incrementará cuando el usuario se registre su nombre.
     updateAndEmitRoomStats();
     updateAndEmitServerStats();
 
-    // --- Manejo de registro de usuario ---
+    // --- Manejo de registro de usuario (desde multiplayer_menu.html) ---
     socket.on('registerUser', (data) => {
         const { username, bio } = data;
-        
-        // Convertir el username a minúsculas para una comparación sin distinción de mayúsculas
-        const lowerCaseUsername = username.toLowerCase();
+        const normalizedUsername = username.toLowerCase();
 
-        // Verificar si el nombre de usuario ya está en uso
-        const isUsernameTaken = Object.values(userProfiles).some(profile => profile.username.toLowerCase() === lowerCaseUsername);
+        // Verificar si el nombre de usuario ya está en uso por CUALQUIER socket activo
+        const isUsernameTaken = Object.values(userProfiles).some(profile => profile.username.toLowerCase() === normalizedUsername);
 
         if (isUsernameTaken) {
+            console.log(`Intento de registro fallido: Nombre de usuario "${username}" ya está en uso.`);
             socket.emit('usernameValidationResponse', { success: false, message: 'El nombre de usuario ya está en uso. Por favor, elige otro.' });
         } else {
             // Guardar el perfil del usuario
             userProfiles[socket.id] = { username, bio, connectedAt: new Date().toISOString() };
-            registeredUsers[lowerCaseUsername] = socket.id; // Guarda la referencia al socket.id
+            usernameToSocketId[normalizedUsername] = socket.id; // Mapear nombre a socket ID
 
-            // AÑADIDO: Incluir mensaje de éxito en la respuesta
+            // Actualizar el objeto 'players' con el nombre de usuario
+            if (players[socket.id]) {
+                players[socket.id].username = username;
+            }
+
+            console.log(`Usuario registrado exitosamente: ${username} (Socket ID: ${socket.id})`);
             socket.emit('usernameValidationResponse', { success: true, message: '¡Perfil guardado correctamente!', userData: userProfiles[socket.id] });
             updateAndEmitRoomStats(); // Actualiza el conteo de jugadores conectados
             updateAndEmitServerStats(); // Actualiza estadísticas generales
         }
     });
 
-    // Manejo de reconexión de usuario (si el usuario ya tenía un perfil)
+    // --- Manejo de reconexión de usuario (desde multiplayer_menu.html) ---
+    // Esto ocurre si el usuario ya tenía un perfil y refresca el menú
     socket.on('userReconnected', (data) => {
         const { username, bio } = data;
-        const lowerCaseUsername = username.toLowerCase();
+        const normalizedUsername = username.toLowerCase();
 
-        // Si el username ya estaba registrado por otro socket (por ejemplo, sesión antigua o refresco rápido)
-        // Podrías añadir lógica para invalidar la sesión anterior o manejarlo según tu juego.
-        // Por simplicidad, si el socket.id es diferente pero el username existe, lo actualizamos.
-        if (registeredUsers[lowerCaseUsername] && registeredUsers[lowerCaseUsername] !== socket.id) {
-            console.log(`Usuario ${username} ya estaba conectado con otro socket ID. Actualizando.`);
-            // Opcional: desconectar el socket anterior si solo quieres una sesión por usuario
-            // io.sockets.sockets.get(registeredUsers[lowerCaseUsername])?.disconnect();
+        // Si el username ya estaba asociado a otro socket ID, significa que el usuario tiene una sesión "vieja" en otro lado.
+        // Opcional: desconectar el socket antiguo si solo se permite una conexión por usuario.
+        if (usernameToSocketId[normalizedUsername] && usernameToSocketId[normalizedUsername] !== socket.id) {
+            console.log(`Usuario "${username}" estaba previamente conectado con socket ID ${usernameToSocketId[normalizedUsername]}. Desconectando sesión antigua.`);
+            const oldSocket = io.sockets.sockets.get(usernameToSocketId[normalizedUsername]);
+            if (oldSocket) {
+                oldSocket.emit('admissionError', 'Te has conectado desde otra ubicación. Tu sesión anterior ha sido cerrada.');
+                oldSocket.disconnect(true); // Desconectar forzosamente la sesión antigua
+            }
+            // Eliminar la entrada antigua de userProfiles si existe
+            if (userProfiles[usernameToSocketId[normalizedUsername]]) {
+                delete userProfiles[usernameToSocketId[normalizedUsername]];
+            }
         }
         
-        // Actualizar o crear el perfil con el nuevo socket.id
+        // Actualizar el perfil del usuario con el nuevo socket.id
         userProfiles[socket.id] = { username, bio, connectedAt: new Date().toISOString() };
-        registeredUsers[lowerCaseUsername] = socket.id; // Asegura que el nuevo socket.id esté asociado al username
+        usernameToSocketId[normalizedUsername] = socket.id; // Mapear nombre a socket ID
 
-        socket.emit('sessionResumed', userProfiles[socket.id]); // Notificar al cliente que la sesión ha sido reanudada
+        if (players[socket.id]) {
+            players[socket.id].username = username;
+        }
+
+        socket.emit('sessionResumed', userProfiles[socket.id]);
         updateAndEmitRoomStats();
         updateAndEmitServerStats();
     });
 
-    // --- Manejo de unión a la sala global ---
-    socket.on('joinGlobalLobby', (data) => {
-        const { username } = data;
-        const user = userProfiles[socket.id];
+    // --- Manejo de la conexión inicial al lobby del juego (desde multiplayer_lobby_server.html) ---
+    // Este es el punto de control clave para el acceso al juego.
+    socket.on('playerConnectedWithUser', (playerData) => {
+        const { id, username, bio, position, rotation, pitchRotation, flashlightOn, playerAnimationState } = playerData;
+        const normalizedUsername = username.toLowerCase();
 
-        if (user && user.username.toLowerCase() === username.toLowerCase()) {
-            // Si el usuario tiene un perfil validado y coincide con el nombre que está intentando usar
-            console.log(`${username} se está uniendo a la sala global.`);
-            socket.emit('admittedToLobby');
-            // Aquí podrías añadir lógica para unirte a una sala de juego real, etc.
-        } else {
-            // Si el usuario no tiene un perfil validado o hay una inconsistencia
-            socket.emit('admissionError', 'Debes tener un perfil de usuario válido y único para unirte a la sala.');
+        // 1. Verificar si el username está registrado en userProfiles Y si el socket.id actual coincide.
+        const registeredProfile = userProfiles[id];
+        const isUsernameAssignedToThisSocket = registeredProfile && registeredProfile.username.toLowerCase() === normalizedUsername;
+
+        // 2. Verificar si el username está en usernameToSocketId Y si el socket.id asociado es diferente al actual (sesión duplicada).
+        const isUsernameTakenByAnotherSocket = usernameToSocketId[normalizedUsername] && usernameToSocketId[normalizedUsername] !== id;
+
+        if (!username || !isUsernameAssignedToThisSocket || isUsernameTakenByAnotherSocket) {
+            let errorMessage = '';
+            if (!username) {
+                errorMessage = 'No se proporcionó un nombre de usuario válido.';
+            } else if (!registeredProfile) {
+                errorMessage = 'Usuario no registrado. Por favor, regístrate en el menú principal.';
+            } else if (registeredProfile.username.toLowerCase() !== normalizedUsername) {
+                errorMessage = `El usuario "${username}" no coincide con el perfil registrado para esta sesión.`;
+            } else if (isUsernameTakenByAnotherSocket) {
+                errorMessage = `El nombre de usuario "${username}" ya está en uso por otra sesión activa. Por favor, cierra la otra instancia o cambia de usuario.`;
+                // Opcional: Desconectar la sesión antigua aquí también si se quiere forzar una sesión única
+                const oldSocket = io.sockets.sockets.get(usernameToSocketId[normalizedUsername]);
+                if (oldSocket) {
+                    oldSocket.emit('admissionError', 'Tu sesión ha sido cerrada porque te conectaste desde otra ubicación.');
+                    oldSocket.disconnect(true);
+                }
+            }
+            console.warn(`Admisión denegada para ${username || 'N/A'} (Socket ID: ${id}). Motivo: ${errorMessage}`);
+            socket.emit('admissionError', errorMessage); // Enviar error al cliente del lobby
+            return; // Detener el procesamiento
         }
+
+        // Si la validación es exitosa, actualizar datos y confirmar admisión
+        players[socket.id] = {
+            position: position,
+            rotation: rotation,
+            pitchRotation: pitchRotation,
+            flashlightOn: flashlightOn,
+            playerAnimationState: playerAnimationState,
+            username: username // Asegurar que el username se guarda en 'players'
+        };
+
+        // Enviar al cliente que la admisión fue exitosa
+        socket.emit('admissionSuccess');
+        console.log(`Admisión exitosa para ${username} (Socket ID: ${id}).`);
+
+        // Enviar a todos los clientes (incluyendo el recién conectado) los jugadores actuales
+        const currentPlayersData = {};
+        for (const playerId in players) {
+            const playerGameData = players[playerId];
+            const userProfileData = userProfiles[playerId] || {}; // Obtener perfil, si existe
+
+            currentPlayersData[playerId] = { 
+                id: playerId, 
+                ...playerGameData, 
+                username: userProfileData.username || playerGameData.username,
+                bio: userProfileData.bio || '' 
+            };
+        }
+        io.emit('currentPlayers', currentPlayersData); // Emitir a TODOS los clientes activos
+
+        // Emitir a todos los demás clientes (excepto al recién conectado) que un nuevo jugador se ha unido
+        socket.broadcast.emit('playerMoved', { 
+            id: socket.id, 
+            ...players[socket.id], 
+            username: username 
+        }); // Enviar el username con el playerData
+
+        updateAndEmitRoomStats(); // Actualiza el conteo de jugadores
+        updateAndEmitServerStats(); // Actualiza estadísticas generales
     });
+
 
     // Cuando un jugador se mueve
     socket.on('playerMoved', (playerData) => {
+        if (!userProfiles[socket.id]) { // Ignorar movimientos si el usuario no está registrado/validado
+            console.warn(`Movimiento ignorado para socket ${socket.id}: Usuario no validado.`);
+            return; 
+        }
+
         if (players[socket.id]) {
             players[socket.id].position = playerData.position;
             players[socket.id].rotation = playerData.rotation;
             players[socket.id].pitchRotation = playerData.pitchRotation;
             players[socket.id].flashlightOn = playerData.flashlightOn;
             players[socket.id].playerAnimationState = playerData.playerAnimationState;
-            // AÑADIDO: Incluir el username si está disponible en userProfiles
-            const username = userProfiles[socket.id] ? userProfiles[socket.id].username : undefined;
+            // Aseguramos que el username siempre venga del perfil registrado para este socket
+            players[socket.id].username = userProfiles[socket.id].username;
 
-            socket.broadcast.emit('playerMoved', { id: socket.id, ...players[socket.id], username: username });
+            socket.broadcast.emit('playerMoved', { 
+                id: socket.id, 
+                ...players[socket.id], 
+                username: players[socket.id].username // Aseguramos enviar el username
+            });
         }
     });
 
     // Cuando un jugador envía un mensaje de chat
-    socket.on('chatMessage', (message) => {
-        const sender = userProfiles[socket.id] ? userProfiles[socket.id].username : 'Anónimo';
-        console.log(`Mensaje de chat de ${sender} (${socket.id}): ${message}`);
-        io.emit('chatMessage', { senderId: socket.id, senderName: sender, text: message });
+    socket.on('chatMessage', (data) => {
+        if (!userProfiles[socket.id]) { // Ignorar chat si el usuario no está registrado/validado
+            console.warn(`Mensaje de chat ignorado para socket ${socket.id}: Usuario no validado.`);
+            return;
+        }
+        const senderName = userProfiles[socket.id].username; // Usar el nombre del perfil registrado
+        console.log(`Mensaje de chat de ${senderName} (${socket.id}): ${data.text}`);
+        io.emit('chatMessage', { senderId: socket.id, senderName: senderName, text: data.text });
     });
 
     // Manejo de desconexión
     socket.on('disconnect', () => {
         console.log('Un usuario se ha desconectado:', socket.id);
 
-        // Almacenar el nombre de usuario antes de eliminarlo del perfil
         let disconnectedUsername = 'Anónimo';
-        if (userProfiles[socket.id]) {
-            disconnectedUsername = userProfiles[socket.id].username;
-            const usernameToRemove = userProfiles[socket.id].username.toLowerCase();
-            delete userProfiles[socket.id];
-            if (registeredUsers[usernameToRemove] === socket.id) {
-                delete registeredUsers[usernameToRemove]; // Solo elimina si este socket era el último en usar ese nombre
+        const userProfile = userProfiles[socket.id];
+        if (userProfile) {
+            disconnectedUsername = userProfile.username;
+            const normalizedUsername = userProfile.username.toLowerCase();
+            
+            delete userProfiles[socket.id]; // Elimina el perfil del usuario
+            if (usernameToSocketId[normalizedUsername] === socket.id) {
+                delete usernameToSocketId[normalizedUsername]; // Elimina el mapeo si este era el socket activo
             }
         }
         
         if (players[socket.id]) {
-            delete players[socket.id];
+            delete players[socket.id]; // Elimina los datos de juego
         }
         
-        // Envía el ID y el nombre de usuario del jugador desconectado a los demás para que lo eliminen de la escena
+        // Envía el ID y el nombre de usuario del jugador desconectado a los demás
         io.emit('playerDisconnected', { id: socket.id, username: disconnectedUsername });
 
         updateAndEmitRoomStats(); // Actualiza el conteo de jugadores
@@ -200,8 +304,8 @@ io.on('connection', (socket) => {
         if (userProfiles[socket.id]) {
             const usernameToClear = userProfiles[socket.id].username.toLowerCase();
             delete userProfiles[socket.id];
-            if (registeredUsers[usernameToClear] === socket.id) {
-                 delete registeredUsers[usernameToClear];
+            if (usernameToSocketId[usernameToClear] === socket.id) {
+                 delete usernameToSocketId[usernameToClear];
             }
             console.log(`Usuario ${usernameToClear} ha cerrado sesión.`);
             updateAndEmitRoomStats();
