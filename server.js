@@ -188,6 +188,67 @@ io.on('connection', (socket) => {
         // y el servidor gestionará su presencia en la sala a través del flujo normal de 'playerMoved'.
     });
 
+    // --- NUEVO OYENTE CRÍTICO PARA EL LOBBY 3D ---
+    // Cuando el cliente del lobby (multiplayer_lobby_server.html) se conecta y envía sus datos iniciales.
+    socket.on('playerConnectedWithUser', (playerData) => {
+        const { id, username, bio, position, rotation, pitchRotation, flashlightOn, playerAnimationState } = playerData;
+        const normalizedUsername = username.toLowerCase();
+
+        console.log(`[LOBBY_CONNECT] Recepción de datos iniciales del jugador en Lobby: "${username}" (Socket ID: ${socket.id}).`);
+
+        // Validación más ligera: solo verificar si el socket está asociado a un perfil válido que ya pasó por el menú.
+        const registeredProfile = userProfiles[socket.id];
+        const isSocketAssociatedWithValidProfile = registeredProfile && registeredProfile.username.toLowerCase() === normalizedUsername;
+        
+        // Si no hay perfil asociado o el nombre no coincide (lo que indica un acceso directo o perfil erróneo)
+        if (!isSocketAssociatedWithValidProfile) {
+            const errorMessage = "No autorizado. Accede desde el menú principal.";
+            console.warn(`[LOBBY_CONNECT] Acceso denegado para ${username || 'N/A'} (Socket ID: ${socket.id}). Motivo: ${errorMessage}`);
+            socket.emit('admissionError', errorMessage); // Enviar error al cliente del lobby
+            socket.disconnect(true); // Desconectar al cliente no autorizado
+            return;
+        }
+
+        // Si la validación es exitosa para el lobby, actualizar los datos del jugador en 'players'
+        players[socket.id] = {
+            position: position,
+            rotation: rotation,
+            pitchRotation: pitchRotation,
+            flashlightOn: flashlightOn,
+            playerAnimationState: playerAnimationState,
+            username: username // Asegurar que el username se guarda en 'players'
+        };
+
+        // Enviar al cliente del lobby la señal para iniciar el juego 3D
+        socket.emit('admissionSuccess');
+        console.log(`[LOBBY_CONNECT] Admisión exitosa al juego 3D para ${username} (Socket ID: ${socket.id}).`);
+
+        // Enviar a todos los clientes (incluyendo el recién conectado) los jugadores actuales
+        const currentPlayersData = {};
+        for (const playerId in players) {
+            const playerGameData = players[playerId];
+            const userProfileData = userProfiles[playerId] || {};
+
+            currentPlayersData[playerId] = { 
+                id: playerId, 
+                ...playerGameData, 
+                username: userProfileData.username || playerGameData.username,
+                bio: userProfileData.bio || '' 
+            };
+        }
+        io.emit('currentPlayers', currentPlayersData); // Emitir a TODOS los clientes activos
+
+        // Emitir a todos los demás clientes (excepto al recién conectado) que un nuevo jugador se ha unido
+        socket.broadcast.emit('playerMoved', { 
+            id: socket.id, 
+            ...players[socket.id], 
+            username: username 
+        }); 
+
+        updateAndEmitRoomStats(); 
+        updateAndEmitServerStats(); 
+    });
+
 
     // Cuando un jugador se mueve (este evento es manejado por multiplayer_lobby_server.html)
     socket.on('playerMoved', (playerData) => {
